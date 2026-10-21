@@ -3,10 +3,10 @@
 
 Usage:
     python src/play.py                                   # auto-discover games
-    python src/play.py star_gambit_skirmish               # by game name
-    python src/play.py configs/star_gambit_skirmish.yaml   # by config file
-    python src/play.py star_gambit_skirmish --think-time 5
-    python src/play.py star_gambit_skirmish --nodes 200
+    python src/play.py uttt                              # by game name
+    python src/play.py configs/uttt.yaml                 # by config file
+    python src/play.py uttt --think-time 5
+    python src/play.py uttt --nodes 200
 """
 
 import argparse
@@ -14,6 +14,7 @@ import glob
 import math
 import os
 import re
+import shutil
 import sys
 import time
 
@@ -28,6 +29,8 @@ from cache_utils import create_cache, cached_inference, print_cache_stats
 from config import GAME_REGISTRY
 from action_selector import ActionSelector
 from game_ui import get_game_ui
+
+FRAME_CLEAR = "\033[H\033[J"
 
 try:
     import torch
@@ -65,7 +68,9 @@ class PlayerConfig:
         self.temperature = DEFAULT_TEMPERATURE
         self.mcts = None
         self.show_hints = False
+        self.show_wld = True
         self.greedy = False
+        self.auto_select = False
         self.batch_size = 0  # 0 = auto, 1 = off (sequential), >1 = fixed
         self._calibrated_timed_bs = None
         # Per-player search algorithm. ``algo_override`` is the explicit user
@@ -86,7 +91,8 @@ class PlayerConfig:
     def __str__(self):
         if not self.is_ai:
             hints_str = ", hints=on" if self.show_hints else ""
-            return f"Human{hints_str}"
+            wld_str = "" if self.show_wld else ", wld=off"
+            return f"Human{hints_str}{wld_str}"
         if self.eval_type == "playout":
             net_str = "playout"
         elif self.network_path:
@@ -96,6 +102,7 @@ class PlayerConfig:
         time_str = f"{self.think_time}s" if self.think_time else "none"
         node_str = str(self.node_limit) if self.node_limit else "none"
         greedy_str = ", greedy" if self.greedy else ""
+        select_str = ", autoselect" if self.auto_select else ""
         batch_str = ""
         if self.batch_size != 1:
             batch_str = f", batch={'auto' if self.batch_size == 0 else self.batch_size}"
@@ -106,7 +113,7 @@ class PlayerConfig:
             else:
                 tag = "puct" if self.algo_override is None else "puct*"
             algo_str = f", algo={tag}"
-        return f"AI(net={net_str}, nodes={node_str}, time={time_str}, temp={self.temperature}{greedy_str}{batch_str}{algo_str})"
+        return f"AI(net={net_str}, nodes={node_str}, time={time_str}, temp={self.temperature}{greedy_str}{select_str}{batch_str}{algo_str})"
 
 
 class PlayContext:
@@ -975,11 +982,26 @@ def handle_config_command(parts, ctx, game_name, base_dir):
             for p in targets:
                 ctx.players[p].show_hints = val in ["on", "true", "1", "yes"]
             print_status(ctx)
+    elif cmd == "wld":
+        if len(parts) >= (3 if player is not None else 2):
+            val = parts[-1]
+            for p in targets:
+                ctx.players[p].show_wld = val in ["on", "true", "1", "yes"]
+            print_status(ctx)
     elif cmd == "greedy":
         if len(parts) >= (3 if player is not None else 2):
             val = parts[-1]
             for p in targets:
                 ctx.players[p].greedy = val in ["on", "true", "1", "yes"]
+            print_status(ctx)
+    elif cmd in ("autoselect", "auto-select", "select"):
+        if len(parts) >= (3 if player is not None else 2):
+            val = parts[-1]
+            for p in targets:
+                ctx.players[p].auto_select = (
+                    ctx.players[p].is_ai
+                    and val in ["on", "true", "1", "yes"]
+                )
             print_status(ctx)
     elif cmd == "batch":
         if len(parts) >= (3 if player is not None else 2):
@@ -1036,7 +1058,10 @@ def parse_meta_command(cmd, ctx, game_name="", base_dir="data"):
     if lower == "manual":
         return "manual"
     parts = lower.split()
-    if parts and parts[0] in ["net", "nodes", "time", "temp", "hints", "greedy", "batch", "delay"]:
+    if parts and parts[0] in [
+        "net", "nodes", "time", "temp", "hints", "wld", "greedy",
+        "autoselect", "auto-select", "select", "batch", "delay",
+    ]:
         return handle_config_command(parts, ctx, game_name, base_dir)
     return None
 
@@ -1058,9 +1083,94 @@ def print_generic_help():
     print("  time <0|1> <secs|off>    - Time limit")
     print("  temp <0|1> <value>       - Temperature")
     print("  hints <0|1> <on|off>     - AI hints for human player")
+    print("  wld <0|1> <on|off>       - Show Win/Loss/Draw estimate")
     print("  greedy <0|1> <on|off>    - Always play best move")
+    print("  autoselect <0|1> <on|off> - Play highlighted move without menu")
     print("  batch <0|1> <0|1|N>      - Batch size (0=auto, 1=off, N=fixed)")
     print("  delay <seconds>          - Turn delay for auto-full mode")
+
+
+def redraw_game_frame(ctx, ui):
+    """Redraw the live game area without appending another board below it."""
+    if sys.stdout.isatty():
+        print(FRAME_CLEAR, end="")
+    else:
+        print()
+    print("=" * 50)
+    print(ui.display_board(ctx.game))
+
+
+def make_action_selector(ctx, ui, entries, preselect=None):
+    """Create a selector sized to the visible space below the board."""
+    if sys.stdout.isatty():
+        terminal_lines = shutil.get_terminal_size((80, 24)).lines
+        board_lines = len(ui.display_board(ctx.game).splitlines())
+        non_action_lines = sum(1 for entry in entries if entry[0] != "action")
+        # Frame header, prompt/status line, non-action menu rows, scroll markers,
+        # blank/footer rows, and one spare row so the prompt does not wrap.
+        reserved = board_lines + non_action_lines + 7
+        max_visible_actions = terminal_lines - reserved
+    else:
+        max_visible_actions = None
+    return ActionSelector(
+        entries,
+        preselect=preselect,
+        max_visible_actions=max_visible_actions,
+    )
+
+
+def format_wld(wld):
+    """Return a compact W/L/D string, or None if no value estimate is available."""
+    if wld is None:
+        return None
+    return f"Win: {wld[0]*100:.1f}%  Loss: {wld[1]*100:.1f}%  Draw: {wld[2]*100:.1f}%"
+
+
+def print_autoselect_move(ui, gs, action, probs, wld=None):
+    """Print the skipped selector's value estimate and selected move."""
+    wld_text = format_wld(wld)
+    if wld_text:
+        print(f"  {wld_text}")
+    print(
+        f"\n>>> Plays: {ui.format_move(gs, action)}  [{probs[action]*100:.1f}%]"
+    )
+
+
+def prepare_human_turn_menu(ctx, ui, current, valids):
+    """Build the human selector menu while keeping W/L/D separate from hints."""
+    pcfg = ctx.players[current]
+    probs = None
+    wld = None
+    highlighted = None
+    has_evaluator = pcfg.network is not None or pcfg.eval_type == "playout"
+    if has_evaluator and (pcfg.show_wld or pcfg.show_hints):
+        model_probs, source, _, model_wld = get_ai_probs(ctx, current, valids)
+        if pcfg.show_wld:
+            wld = model_wld
+        if pcfg.show_hints:
+            probs = model_probs
+            print(f"\nHints [{source}]:")
+            if pcfg.greedy:
+                highlighted = int(np.argmax(probs))
+            else:
+                highlighted = int(np.random.choice(len(probs), p=probs))
+    entries = ui.build_action_menu(ctx.game, probs, valids, wld=wld)
+    return entries, highlighted, probs, wld
+
+
+def undo_move(ctx, history):
+    """Undo a move, skipping restored turns that would immediately autoselect."""
+    if not history:
+        return False
+    ctx.game = history.pop()
+    while history:
+        player = ctx.players[ctx.game.current_player()]
+        if not (player.is_ai and player.auto_select):
+            break
+        ctx.game = history.pop()
+    for player in ctx.players:
+        player.mcts = None
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1204,6 +1314,11 @@ def prompt_ai_config(ctx, args):
         if p.is_ai:
             p.greedy = greedy
 
+    auto_select = _prompt_bool("Auto-select highlighted move", False)
+    for p in ctx.players:
+        if p.is_ai:
+            p.auto_select = auto_select
+
     # Batch size (only when a network is loaded)
     has_network = any(p.network is not None for p in ctx.players if p.is_ai)
     if has_network:
@@ -1329,13 +1444,12 @@ def main():
     history = []
 
     while True:
-        print("\n" + "=" * 50)
-        print(ui.display_board(ctx.game))
+        redraw_game_frame(ctx, ui)
 
         scores = ctx.game.scores()
         if scores is not None:
             scores_arr = np.array(scores)
-            winners = np.where(scores_arr == 1)[0]
+            winners = np.where(scores_arr[:ctx.game.num_players()] == 1)[0]
             if len(winners) > 0:
                 print(f"\nPlayer {winners[0]} wins!")
             else:
@@ -1385,10 +1499,17 @@ def main():
                         ai_best = int(np.argmax(probs))
                     else:
                         ai_best = int(np.random.choice(len(probs), p=probs))
+                    if pcfg.auto_select:
+                        print_autoselect_move(ui, ctx.game, ai_best, probs, wld)
+                        advance_mcts_trees(ctx, ai_best)
+                        history.append(ctx.game.copy())
+                        ctx.game.play_move(ai_best)
+                        continue
                     entries = ui.build_action_menu(ctx.game, probs, valids, wld=wld)
                     use_text = False
                     try:
-                        selector = ActionSelector(entries, preselect=ai_best)
+                        selector = make_action_selector(
+                            ctx, ui, entries, preselect=ai_best)
                         result = selector.run()
                     except (ValueError, OSError):
                         use_text = True
@@ -1411,10 +1532,7 @@ def main():
                         if result == 'quit':
                             return
                         if result == 'undo':
-                            if history:
-                                ctx.game = history.pop()
-                                for p in ctx.players:
-                                    p.mcts = None
+                            if undo_move(ctx, history):
                                 print("Move undone")
                             else:
                                 print("No moves to undo")
@@ -1458,10 +1576,7 @@ def main():
                             ui.show_help(ctx.game)
                             continue
                         if meta == "undo":
-                            if history:
-                                ctx.game = history.pop()
-                                for p in ctx.players:
-                                    p.mcts = None
+                            if undo_move(ctx, history):
                                 print("Move undone")
                                 break
                             print("No moves to undo")
@@ -1520,10 +1635,17 @@ def main():
                     ai_best = int(np.argmax(probs))
                 else:
                     ai_best = int(np.random.choice(len(probs), p=probs))
+                if pcfg.auto_select:
+                    print_autoselect_move(ui, ctx.game, ai_best, probs, wld)
+                    advance_mcts_trees(ctx, ai_best)
+                    history.append(ctx.game.copy())
+                    ctx.game.play_move(ai_best)
+                    continue
                 entries = ui.build_action_menu(ctx.game, probs, valids, wld=wld)
                 use_text = False
                 try:
-                    selector = ActionSelector(entries, preselect=ai_best)
+                    selector = make_action_selector(
+                        ctx, ui, entries, preselect=ai_best)
                     result = selector.run()
                 except (ValueError, OSError):
                     use_text = True
@@ -1544,10 +1666,7 @@ def main():
                     if result == 'quit':
                         return
                     if result == 'undo':
-                        if history:
-                            ctx.game = history.pop()
-                            for p in ctx.players:
-                                p.mcts = None
+                        if undo_move(ctx, history):
                             print("Move undone")
                         else:
                             print("No moves to undo")
@@ -1590,10 +1709,7 @@ def main():
                         ui.show_help(ctx.game)
                         continue
                     if meta == "undo":
-                        if history:
-                            ctx.game = history.pop()
-                            for p in ctx.players:
-                                p.mcts = None
+                        if undo_move(ctx, history):
                             print("Move undone")
                             break
                         print("No moves to undo")
@@ -1628,19 +1744,13 @@ def main():
                     )
         else:
             # Human turn
-            probs = None
-            wld = None
-            if pcfg.show_hints and (
-                pcfg.network is not None or pcfg.eval_type == "playout"
-            ):
-                probs, source, _, wld = get_ai_probs(ctx, current, valids)
-                print(f"\nHints [{source}]:")
-
             # Try arrow-key selector first
-            entries = ui.build_action_menu(ctx.game, probs, valids, wld=wld)
+            entries, highlighted, probs, wld = prepare_human_turn_menu(
+                ctx, ui, current, valids
+            )
             use_text = False
             try:
-                selector = ActionSelector(entries)
+                selector = make_action_selector(ctx, ui, entries, preselect=highlighted)
                 result = selector.run()
             except (ValueError, OSError):
                 use_text = True
@@ -1662,10 +1772,7 @@ def main():
                 if result == 'quit':
                     return
                 if result == 'undo':
-                    if history:
-                        ctx.game = history.pop()
-                        for p in ctx.players:
-                            p.mcts = None
+                    if undo_move(ctx, history):
                         print("Move undone")
                     else:
                         print("No moves to undo")
@@ -1702,10 +1809,7 @@ def main():
                     ui.show_help(ctx.game)
                     continue
                 if meta == "undo":
-                    if history:
-                        ctx.game = history.pop()
-                        for p in ctx.players:
-                            p.mcts = None
+                    if undo_move(ctx, history):
                         print("Move undone")
                         break
                     print("No moves to undo")

@@ -50,7 +50,7 @@ def test_compute_batch_size_no_hard_cap():
 
 def test_run_one_batch_returns_actual_sims():
     """_run_one_batch returns actual simulation count, not nominal batch_size."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     mcts = create_mcts(type(gs))
     batch_size = 4
 
@@ -64,7 +64,7 @@ def test_run_one_batch_returns_actual_sims():
 
 def test_run_one_batch_cache_hits_extra_sims():
     """With a warm cache, actual_sims > len(pending_gpu) due to cache hits."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     cache = create_cache(type(gs), 1000)
     mcts = create_mcts(type(gs))
     batch_size = 8
@@ -81,7 +81,7 @@ def test_run_one_batch_cache_hits_extra_sims():
 
 def test_mcts_search_node_limit():
     """Basic correctness with auto batch and node limit."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     mcts = create_mcts(type(gs))
     node_limit = 50
 
@@ -97,7 +97,7 @@ def test_mcts_search_node_limit():
 
 def test_mcts_search_sequential_unchanged():
     """batch_size=1 path still works correctly."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     mcts = create_mcts(type(gs))
     node_limit = 20
 
@@ -112,7 +112,7 @@ def test_mcts_search_sequential_unchanged():
 
 def test_mcts_search_timed_auto():
     """Timed mode completes and produces results."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     mcts = create_mcts(type(gs))
 
     counts, sims, wld = run_mcts_search(
@@ -129,7 +129,7 @@ def test_mcts_search_timed_auto():
 
 def test_calibrate_timed_batch():
     """Calibration returns a power of 2, >= 2."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
 
     result = calibrate_timed_batch(gs, None, time_limit=1.0,
                                     eval_type="random", cache=None)
@@ -144,7 +144,7 @@ def test_calibrate_timed_batch():
 
 def test_update_caches_shared_when_no_time():
     """No think_time -> shared cache, no per-player caches."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     ctx = PlayContext(gs, type(gs), cache_size=1000)
     ctx.players[0].is_ai = True
     ctx.players[1].is_ai = True
@@ -158,7 +158,7 @@ def test_update_caches_shared_when_no_time():
 
 def test_update_caches_split_when_timed():
     """With think_time -> per-player caches, no shared cache."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     ctx = PlayContext(gs, type(gs), cache_size=1000)
     ctx.players[0].is_ai = True
     ctx.players[0].think_time = 2.0
@@ -178,7 +178,7 @@ def test_update_caches_split_when_timed():
 
 def test_update_caches_disabled():
     """cache_size=0 -> all caches are None."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     ctx = PlayContext(gs, type(gs), cache_size=0)
     ctx.players[0].think_time = 2.0
     _update_caches(ctx)

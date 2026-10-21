@@ -43,9 +43,9 @@ class NNArgs:
     depth: int
     kernel_size: int
     dense_net: bool = False
+    uttt_hierarchical: bool = False
     lr: float = 0.01
     cv: float = 1.5
-    star_gambit_spatial: bool = False
     head_channels: int = 32
     head_pool: bool = True
     v_fc_hidden: int = -1    # -1 = auto-derive as head_channels * 8
@@ -54,14 +54,28 @@ class NNArgs:
     pi_head_convs: int = 0   # extra conv layers in policy head (0 = current behavior)
     v_fc_layers: int = 1     # hidden FC layers in value head (1 = current behavior)
     pi_fc_layers: int = 0    # hidden FC layers in policy head (0 = current single-projection)
+    uttt_policy_head: str = "flat"
+    uttt_destination_context: bool = False
+    # UTTT hierarchical local-board encoder width is num_channels. Macro-board
+    # reasoning can use a separate width; -1 preserves legacy tied-width models.
+    uttt_macro_channels: int = -1
+    uttt_macro_transformer_layers: int = 0
+    uttt_macro_transformer_heads: int = 4
+    uttt_macro_transformer_ff_mult: float = 4.0
+    uttt_macro_transformer_dropout: float = 0.0
     # "batch" (current default, nn.BatchNorm2d) or "layer" (GroupNorm(1, C) ==
     # LayerNorm across (C, H, W) per sample). LayerNorm avoids batch-statistic
     # propagation through bootstrap targets, a documented driver of feature
     # collapse / plasticity loss in deep RL (Liu et al. 2024).
     trunk_norm: str = "batch"
     # AlphaZero standard. Mirrors TrainConfig.weight_decay default. Old value
-    # was 1e-3; star_gambit train-fixes validated 1e-4 empirically.
+    # was 1e-3; experiments validated 1e-4 empirically.
     weight_decay: float = 1e-4
+    optimizer: str = "sgd"
+    policy_loss: str = "cross_entropy"
+    adamw_beta1: float = 0.9
+    adamw_beta2: float = 0.999
+    adamw_eps: float = 1e-8
     # Trunk activation. "relu" = nn.ReLU (default). "crelu" = Concatenated ReLU,
     # which preserves negative-direction features (doubles conv in-channels in
     # blocks). Abbas et al. 2023 found this the single most effective plasticity
@@ -72,6 +86,10 @@ class NNArgs:
     # 0 disables. Direct mechanism to keep effective rank high by penalizing
     # filter correlation. See Bjorck et al. 2021.
     orth_reg_lambda: float = 0.0
+    # Observation channel count the checkpoint/network was built for. None means
+    # use the game's current canonical shape. This keeps old UTTT nine-plane
+    # checkpoints loadable after adding extra input planes.
+    input_channels: int | None = None
 
     def __post_init__(self):
         if self.v_fc_hidden == -1:
@@ -87,20 +105,49 @@ def nnargs_from_config(config):
         depth=config.depth,
         kernel_size=config.kernel_size,
         dense_net=config.dense_net,
+        uttt_hierarchical=config.uttt_hierarchical,
         lr=config.lr,
         cv=config.cv,
-        star_gambit_spatial=config.star_gambit_spatial,
         head_channels=config.head_channels,
         head_pool=config.head_pool,
         v_head_convs=config.v_head_convs,
         pi_head_convs=config.pi_head_convs,
         v_fc_layers=config.v_fc_layers,
         pi_fc_layers=config.pi_fc_layers,
+        uttt_policy_head=config.uttt_policy_head,
+        uttt_destination_context=config.uttt_destination_context,
+        uttt_macro_channels=config.uttt_macro_channels,
+        uttt_macro_transformer_layers=config.uttt_macro_transformer_layers,
+        uttt_macro_transformer_heads=config.uttt_macro_transformer_heads,
+        uttt_macro_transformer_ff_mult=config.uttt_macro_transformer_ff_mult,
+        uttt_macro_transformer_dropout=config.uttt_macro_transformer_dropout,
         trunk_norm=config.trunk_norm,
         weight_decay=config.weight_decay,
+        optimizer=config.optimizer,
+        policy_loss=config.policy_loss,
+        adamw_beta1=config.adamw_beta1,
+        adamw_beta2=config.adamw_beta2,
+        adamw_eps=config.adamw_eps,
         trunk_act=config.trunk_act,
         orth_reg_lambda=config.orth_reg_lambda,
     )
+
+
+def _infer_input_channels_from_state_dict(state_dict):
+    """Return checkpoint input channels from the first convolution weight."""
+    candidate_keys = (
+        "arch.local_stem.0.weight",  # UTTT hierarchical
+        "conv1.weight",             # residual trunk
+        "layers.0.conv1.weight",    # dense trunk first 1x1 conv
+    )
+    for key in candidate_keys:
+        weight = state_dict.get(key)
+        if weight is not None and getattr(weight, "ndim", 0) >= 2:
+            return int(weight.shape[1])
+    for key, weight in state_dict.items():
+        if key.endswith(".weight") and getattr(weight, "ndim", 0) == 4:
+            return int(weight.shape[1])
+    return None
 
 
 def get_device():
@@ -232,19 +279,303 @@ class ResidualBlock(nn.Module):
         return out
 
 
+class UTTTHierarchicalArch(nn.Module):
+    """UTTT-specific local-board + macro-board architecture.
+
+    The input remains the normal [B, C, 9, 9] canonical tensor. The network first
+    applies a shared encoder to each 3x3 small board, then runs a macro encoder
+    over the resulting 3x3 grid of board embeddings. Policy logits are produced
+    from per-cell local features fused with the macro context for that board.
+    """
+
+    def __init__(self, game, args, in_channels, in_x, in_y):
+        super().__init__()
+        if in_x != 9 or in_y != 9 or game.NUM_MOVES() != 81:
+            raise ValueError("uttt_hierarchical requires a 9x9 / 81-move UTTT game")
+
+        norm_type = getattr(args, "trunk_norm", "batch")
+        act_type = getattr(args, "trunk_act", "relu")
+        local_width = args.num_channels
+        macro_width = int(getattr(args, "uttt_macro_channels", -1) or -1)
+        if macro_width <= 0:
+            macro_width = local_width
+        head_channels = args.head_channels
+        local_depth = max(1, args.depth // 2)
+        macro_depth = max(1, args.depth - local_depth)
+        self.policy_head = getattr(args, "uttt_policy_head", "flat")
+        self.destination_context = getattr(args, "uttt_destination_context", False)
+        transformer_layers = int(getattr(args, "uttt_macro_transformer_layers", 0) or 0)
+        transformer_heads = int(getattr(args, "uttt_macro_transformer_heads", 4) or 4)
+        transformer_ff_mult = float(getattr(args, "uttt_macro_transformer_ff_mult", 4.0))
+        transformer_dropout = float(getattr(args, "uttt_macro_transformer_dropout", 0.0))
+        valid_policy_heads = {"flat", "factorized_simple", "factorized_hybrid"}
+        if self.policy_head not in valid_policy_heads:
+            raise ValueError(
+                f"Unknown uttt_policy_head={self.policy_head!r}; "
+                f"expected one of {sorted(valid_policy_heads)}"
+            )
+        if transformer_layers < 0:
+            raise ValueError("uttt_macro_transformer_layers must be >= 0")
+        if transformer_layers > 0:
+            if transformer_heads < 1:
+                raise ValueError("uttt_macro_transformer_heads must be >= 1")
+            if macro_width % transformer_heads != 0:
+                raise ValueError(
+                    "uttt_macro_transformer_heads must divide uttt_macro_channels "
+                    f"({transformer_heads} heads for {macro_width} channels)"
+                )
+            if transformer_ff_mult <= 0.0:
+                raise ValueError("uttt_macro_transformer_ff_mult must be > 0")
+            if not 0.0 <= transformer_dropout < 1.0:
+                raise ValueError("uttt_macro_transformer_dropout must be in [0, 1)")
+
+        self.local_stem = nn.Sequential(
+            conv(in_channels, local_width, kernel_size=args.kernel_size),
+            _make_norm(local_width, norm_type),
+            nn.ReLU(inplace=True),
+        )
+        self.local_blocks = nn.Sequential(*[
+            ResidualBlock(
+                local_width,
+                local_width,
+                kernel_size=args.kernel_size,
+                norm_type=norm_type,
+                act_type=act_type,
+            )
+            for _ in range(local_depth)
+        ])
+        self.local_pool = nn.AdaptiveAvgPool2d(1)
+        self.macro_proj = (
+            nn.Identity()
+            if macro_width == local_width
+            else nn.Linear(local_width, macro_width)
+        )
+
+        self.macro_transformer = None
+        if transformer_layers > 0:
+            ff_channels = max(macro_width, int(round(macro_width * transformer_ff_mult)))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=macro_width,
+                nhead=transformer_heads,
+                dim_feedforward=ff_channels,
+                dropout=transformer_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            try:
+                self.macro_transformer = nn.TransformerEncoder(
+                    encoder_layer,
+                    num_layers=transformer_layers,
+                    enable_nested_tensor=False,
+                )
+            except TypeError:
+                self.macro_transformer = nn.TransformerEncoder(
+                    encoder_layer,
+                    num_layers=transformer_layers,
+                )
+            self.macro_pos_embedding = nn.Parameter(torch.zeros(1, 9, macro_width))
+            nn.init.trunc_normal_(self.macro_pos_embedding, std=0.02)
+
+        self.macro_blocks = nn.Sequential(*[
+            ResidualBlock(
+                macro_width,
+                macro_width,
+                kernel_size=args.kernel_size,
+                norm_type=norm_type,
+                act_type=act_type,
+            )
+            for _ in range(macro_depth)
+        ])
+
+        fuse_in_channels = local_width + macro_width * (2 if self.destination_context else 1)
+        self.fuse = nn.Sequential(
+            conv1x1(fuse_in_channels, head_channels),
+            nn.BatchNorm2d(head_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        self.v_pool = nn.AdaptiveAvgPool2d(1)
+        self.v_flatten = nn.Flatten()
+        self.v_fc1 = nn.Linear(macro_width, args.v_fc_hidden)
+        self.v_fc1_relu = nn.ReLU(inplace=True)
+        if args.v_fc_layers > 1:
+            v_fc_extra = []
+            for _ in range(args.v_fc_layers - 1):
+                v_fc_extra.extend([
+                    nn.Linear(args.v_fc_hidden, args.v_fc_hidden),
+                    nn.ReLU(inplace=True),
+                ])
+            self.v_fc_extra = nn.Sequential(*v_fc_extra)
+        self.v_fc2 = nn.Linear(args.v_fc_hidden, game.NUM_PLAYERS() + 1)
+        self.v_softmax = nn.LogSoftmax(1)
+
+        self.pi_conv = conv1x1(head_channels, head_channels)
+        self.pi_bn = nn.BatchNorm2d(head_channels)
+        self.pi_relu = nn.ReLU(inplace=True)
+        if args.pi_head_convs > 0:
+            pi_conv_layers = []
+            for _ in range(args.pi_head_convs):
+                pi_conv_layers.extend([
+                    conv(head_channels, head_channels, kernel_size=args.kernel_size),
+                    nn.BatchNorm2d(head_channels),
+                    nn.ReLU(inplace=True),
+                ])
+            self.pi_extra_convs = nn.Sequential(*pi_conv_layers)
+        self.pi_flatten = nn.Flatten()
+        if self.policy_head in ("flat", "factorized_hybrid"):
+            if args.pi_fc_layers > 0:
+                self.pi_fc1 = nn.Linear(9 * 9 * head_channels, args.pi_fc_hidden)
+                if args.pi_fc_layers > 1:
+                    pi_fc_extra = []
+                    for _ in range(args.pi_fc_layers - 1):
+                        pi_fc_extra.extend([
+                            nn.Linear(args.pi_fc_hidden, args.pi_fc_hidden),
+                            nn.ReLU(inplace=True),
+                        ])
+                    self.pi_fc_extra = nn.Sequential(*pi_fc_extra)
+                self.pi_fc_out = nn.Linear(args.pi_fc_hidden, game.NUM_MOVES())
+            else:
+                self.pi_fc1 = nn.Linear(9 * 9 * head_channels, game.NUM_MOVES())
+        if self.policy_head in ("factorized_simple", "factorized_hybrid"):
+            self.pi_board_conv = conv1x1(macro_width, 1)
+            self.pi_cell_conv = conv1x1(head_channels, 1)
+        self.pi_fc_layers = args.pi_fc_layers
+        self.pi_softmax = nn.LogSoftmax(1)
+
+    @staticmethod
+    def _spatial_logits_to_move_order(x):
+        batch_size = x.shape[0]
+        boards = UTTTHierarchicalArch._split_boards(x)
+        return boards.view(batch_size, 9, 9)
+
+    def _flat_policy_logits(self, pi):
+        pi = self.pi_flatten(pi)
+        if hasattr(self, 'pi_fc_out'):
+            pi = self.pi_fc1(pi)
+            pi = torch.relu(pi)
+            if hasattr(self, 'pi_fc_extra'):
+                pi = self.pi_fc_extra(pi)
+            return self.pi_fc_out(pi)
+        else:
+            return self.pi_fc1(pi)
+
+    def _factorized_policy_logits(self, macro, pi):
+        board_logits = self.pi_board_conv(macro).flatten(1)
+        cell_logits = self.pi_cell_conv(pi)
+        cell_logits = self._spatial_logits_to_move_order(cell_logits)
+        return (board_logits.unsqueeze(-1) + cell_logits).reshape(macro.shape[0], 81)
+
+    @staticmethod
+    def _destination_context_grid(macro):
+        batch_size, width, _, _ = macro.shape
+        dest_cells = (
+            macro[:, None, :, :, :]
+            .expand(batch_size, 9, width, 3, 3)
+            .contiguous()
+            .view(batch_size * 9, width, 3, 3)
+        )
+        return UTTTHierarchicalArch._merge_boards(dest_cells, batch_size)
+
+    @staticmethod
+    def _macro_grid_to_tokens(macro):
+        b, c, _, _ = macro.shape
+        return macro.permute(0, 2, 3, 1).contiguous().view(b, 9, c)
+
+    @staticmethod
+    def _macro_tokens_to_grid(tokens):
+        b, _, c = tokens.shape
+        return tokens.view(b, 3, 3, c).permute(0, 3, 1, 2).contiguous()
+
+    def _apply_macro_transformer(self, macro):
+        if self.macro_transformer is None:
+            return macro
+        tokens = self._macro_grid_to_tokens(macro)
+        tokens = self.macro_transformer(tokens + self.macro_pos_embedding)
+        return self._macro_tokens_to_grid(tokens)
+
+    @staticmethod
+    def _split_boards(x):
+        b, c, _, _ = x.shape
+        return (
+            x.view(b, c, 3, 3, 3, 3)
+            .permute(0, 2, 4, 1, 3, 5)
+            .contiguous()
+            .view(b * 9, c, 3, 3)
+        )
+
+    @staticmethod
+    def _merge_boards(x, batch_size):
+        _, c, _, _ = x.shape
+        return (
+            x.view(batch_size, 3, 3, c, 3, 3)
+            .permute(0, 3, 1, 4, 2, 5)
+            .contiguous()
+            .view(batch_size, c, 9, 9)
+        )
+
+    def forward(self, s):
+        batch_size = s.shape[0]
+        local = self._split_boards(s)
+        local = self.local_stem(local)
+        local = self.local_blocks(local)
+
+        local_emb = self.local_pool(local).flatten(1)
+        local_emb = self.macro_proj(local_emb)
+        macro = (
+            local_emb.view(batch_size, 3, 3, -1)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+        macro = self._apply_macro_transformer(macro)
+        macro = self.macro_blocks(macro)
+
+        v = self.v_pool(macro)
+        v = self.v_flatten(v)
+        v = self.v_fc1(v)
+        v = self.v_fc1_relu(v)
+        if hasattr(self, 'v_fc_extra'):
+            v = self.v_fc_extra(v)
+        v = self.v_fc2(v)
+        v = self.v_softmax(v)
+
+        local_grid = self._merge_boards(local, batch_size)
+        macro_grid = macro.repeat_interleave(3, dim=2).repeat_interleave(3, dim=3)
+        policy_features = [local_grid, macro_grid]
+        if self.destination_context:
+            policy_features.append(self._destination_context_grid(macro))
+        pi = self.fuse(torch.cat(policy_features, dim=1))
+        pi = self.pi_conv(pi)
+        pi = self.pi_bn(pi)
+        pi = self.pi_relu(pi)
+        if hasattr(self, 'pi_extra_convs'):
+            pi = self.pi_extra_convs(pi)
+
+        if self.policy_head == "factorized_simple":
+            pi = self._factorized_policy_logits(macro, pi)
+        elif self.policy_head == "factorized_hybrid":
+            pi = self._flat_policy_logits(pi) + self._factorized_policy_logits(macro, pi)
+        else:
+            pi = self._flat_policy_logits(pi)
+
+        pi = self.pi_softmax(pi)
+        return v, pi
+
+
 class NNArch(nn.Module):
     def __init__(self, game, args):
         super(NNArch, self).__init__()
         # game params
         in_channels, in_x, in_y = game.CANONICAL_SHAPE()
+        if getattr(args, "input_channels", None) is not None:
+            in_channels = int(args.input_channels)
+        if getattr(args, "uttt_hierarchical", False):
+            self.arch = UTTTHierarchicalArch(game, args, in_channels, in_x, in_y)
+            return
         self.dense_net = args.dense_net
-        self.star_gambit_spatial = args.star_gambit_spatial
         self.head_pool = args.head_pool
         self.pi_fc_layers = args.pi_fc_layers
         HC = args.head_channels
-
-        if args.pi_fc_layers > 0 and args.star_gambit_spatial:
-            raise ValueError("pi_fc_layers not supported with star_gambit_spatial policy head")
 
         norm_type = getattr(args, "trunk_norm", "batch")
         act_type = getattr(args, "trunk_act", "relu")
@@ -337,53 +668,26 @@ class NNArch(nn.Module):
                 ])
             self.pi_extra_convs = nn.Sequential(*pi_conv_layers)
 
-        if self.star_gambit_spatial:
-            # Star Gambit spatial policy head:
-            # - Spatial actions: BOARD_DIM x BOARD_DIM x 10 action types per position
-            # - Global actions: 18 deploy + 1 end_turn = 19
-            self.sg_board_dim = in_x  # 11 for Skirmish/Clash, 13 for Battle
-            self.sg_spatial_actions = in_x * in_y * 10
-            self.sg_global_actions = 19  # deploy (18) + end_turn (1)
-
-            # Spatial policy: conv output (B, 10, H, W) -> (B, H*W*10)
-            self.pi_conv2 = conv1x1(HC, 10)
-            self.pi_bn2 = nn.BatchNorm2d(10)
-
-            # Global policy: for deploy and end_turn actions
-            self.pi_flatten = nn.Flatten()
-            if args.head_pool:
-                self.pi_pool = nn.AdaptiveAvgPool2d(1)
-                pi_global_in = HC
-            else:
-                pi_global_in = HC * in_x * in_y
-            self.pi_global = nn.Sequential(
-                nn.Linear(pi_global_in, args.pi_fc_hidden),
-                nn.ReLU(inplace=True),
-                nn.Linear(args.pi_fc_hidden, self.sg_global_actions),
-                nn.LayerNorm(self.sg_global_actions)
-            )
-            self.pi_softmax = nn.LogSoftmax(1)
+        # Standard fully-connected policy head.
+        self.pi_flatten = nn.Flatten()
+        if args.pi_fc_layers > 0:
+            self.pi_fc1 = nn.Linear(in_x * in_y * HC, args.pi_fc_hidden)
+            if args.pi_fc_layers > 1:
+                pi_fc_extra = []
+                for _ in range(args.pi_fc_layers - 1):
+                    pi_fc_extra.extend([
+                        nn.Linear(args.pi_fc_hidden, args.pi_fc_hidden),
+                        nn.ReLU(inplace=True),
+                    ])
+                self.pi_fc_extra = nn.Sequential(*pi_fc_extra)
+            self.pi_fc_out = nn.Linear(args.pi_fc_hidden, game.NUM_MOVES())
         else:
-            # Standard fully-connected policy head
-            self.pi_flatten = nn.Flatten()
-            if args.pi_fc_layers > 0:
-                # Multi-layer policy FC head
-                self.pi_fc1 = nn.Linear(in_x * in_y * HC, args.pi_fc_hidden)
-                if args.pi_fc_layers > 1:
-                    pi_fc_extra = []
-                    for _ in range(args.pi_fc_layers - 1):
-                        pi_fc_extra.extend([
-                            nn.Linear(args.pi_fc_hidden, args.pi_fc_hidden),
-                            nn.ReLU(inplace=True),
-                        ])
-                    self.pi_fc_extra = nn.Sequential(*pi_fc_extra)
-                self.pi_fc_out = nn.Linear(args.pi_fc_hidden, game.NUM_MOVES())
-            else:
-                # Single projection (current default)
-                self.pi_fc1 = nn.Linear(in_x * in_y * HC, game.NUM_MOVES())
-            self.pi_softmax = nn.LogSoftmax(1)
+            self.pi_fc1 = nn.Linear(in_x * in_y * HC, game.NUM_MOVES())
+        self.pi_softmax = nn.LogSoftmax(1)
 
     def forward(self, s):
+        if hasattr(self, "arch"):
+            return self.arch(s)
         # s: batch_size x num_channels x board_x x board_y
         if not self.dense_net:
             s = self.conv1(s)
@@ -411,28 +715,7 @@ class NNArch(nn.Module):
         if hasattr(self, 'pi_extra_convs'):
             pi = self.pi_extra_convs(pi)
 
-        if self.star_gambit_spatial:
-            # Spatial policy head for Star Gambit
-            # s_flat for global actions, pi for spatial
-            if self.head_pool:
-                s_flat = self.pi_flatten(self.pi_pool(pi))
-            else:
-                s_flat = self.pi_flatten(pi)
-
-            # Spatial actions: (B, HC, H, W) -> (B, 10, H, W) -> (B, H, W, 10) -> (B, H*W*10)
-            pi_spatial = self.pi_conv2(pi)
-            pi_spatial = self.pi_bn2(pi_spatial)
-            pi_spatial = pi_spatial.permute(0, 2, 3, 1)  # (B, H, W, 10)
-            batch_size = pi_spatial.shape[0]
-            pi_spatial = pi_spatial.reshape(batch_size, -1)  # (B, H*W*10)
-
-            # Global actions: deploy + end_turn
-            pi_global = self.pi_global(s_flat)  # (B, 19)
-
-            # Concatenate: spatial + global
-            pi = torch.cat([pi_spatial, pi_global], dim=1)  # (B, H*W*10 + 19)
-            pi = self.pi_softmax(pi)
-        elif self.pi_fc_layers > 0:
+        if self.pi_fc_layers > 0:
             pi = self.pi_flatten(pi)
             pi = self.pi_fc1(pi)
             pi = torch.relu(pi)
@@ -506,15 +789,30 @@ class NNWrapper:
         self.nnet = NNArch(game, args)
         self.weight_decay = getattr(args, "weight_decay", 1e-4)
         self.orth_reg_lambda = getattr(args, "orth_reg_lambda", 0.0)
-        self.optimizer = optim.SGD(
-            self.nnet.parameters(), lr=args.lr, momentum=0.9,
-            weight_decay=self.weight_decay,
-        )
+        self.policy_loss = getattr(args, "policy_loss", "cross_entropy")
+        optimizer_name = getattr(args, "optimizer", "sgd")
+        if optimizer_name == "sgd":
+            self.optimizer = optim.SGD(
+                self.nnet.parameters(), lr=args.lr, momentum=0.9,
+                weight_decay=self.weight_decay,
+            )
+        elif optimizer_name == "adamw":
+            self.optimizer = optim.AdamW(
+                self.nnet.parameters(), lr=args.lr,
+                weight_decay=self.weight_decay,
+                betas=(args.adamw_beta1, args.adamw_beta2),
+                eps=args.adamw_eps,
+            )
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer_name}")
         self.device = get_device()
         self.cv = args.cv
         self.nnet.to(self.device)
+        self._input_channels = int(args.input_channels) if args.input_channels is not None else int(game.CANONICAL_SHAPE()[0])
         self._amp_enabled = False
         self._graph_inference = None
+        self._compiled_inference = False
+        self._compiled_static_batch_size = None
         # non_blocking transfers are only safe on CUDA with pinned memory;
         # on MPS, intermediate tensors from .float().contiguous() can be GC'd
         # before the async transfer completes, causing data corruption.
@@ -529,6 +827,19 @@ class NNWrapper:
         if compile and is_gpu:
             try:
                 if self.device.type == 'cuda':
+                    # Keep Inductor away from autotune modes that can be
+                    # unstable on smaller GPUs.
+                    from torch._inductor import config as inductor_config
+                    inductor_config.max_autotune = False
+                    inductor_config.max_autotune_gemm = False
+                    if hasattr(inductor_config.triton, "cudagraphs"):
+                        inductor_config.triton.cudagraphs = False
+                    if hasattr(inductor_config, "coordinate_descent_tuning"):
+                        inductor_config.coordinate_descent_tuning = False
+                    if hasattr(inductor_config.triton, "cudagraph_skip_dynamic_graphs"):
+                        inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+                    if hasattr(inductor_config.triton, "cudagraph_dynamic_shape_warn_limit"):
+                        inductor_config.triton.cudagraph_dynamic_shape_warn_limit = None
                     cap = torch.cuda.get_device_capability(self.device)
                     if cap[0] < 7:
                         # Triton requires CC >= 7.0; manual JIT + CUDA graphs instead
@@ -538,14 +849,16 @@ class NNWrapper:
                         )
                         self._apply_jit_and_cuda_graphs()
                         return
-                self.nnet = torch.compile(self.nnet, mode="reduce-overhead")
+                self.nnet = torch.compile(self.nnet, dynamic=False)
+                self._compiled_inference = True
             except Exception:
                 pass  # graceful fallback
 
     def _apply_jit_and_cuda_graphs(self):
         """JIT trace + CUDA graph caching for older GPUs (CC < 7.0)."""
         try:
-            in_shape = self.game.CANONICAL_SHAPE()
+            game_shape = self.game.CANONICAL_SHAPE()
+            in_shape = (self._input_channels, game_shape[1], game_shape[2])
             dummy = torch.randn(1, *in_shape, device=self.device, dtype=torch.float32)
             self.nnet.eval()
             with torch.no_grad():
@@ -562,10 +875,25 @@ class NNWrapper:
             )
             self._graph_inference = None
 
+    def _adapt_input_planes(self, batch):
+        """Match runtime canonical tensors to the checkpoint's input planes."""
+        expected = self._input_channels
+        actual = int(batch.shape[1])
+        if actual == expected:
+            return batch
+        if actual > expected:
+            return batch[:, :expected, :, :]
+        raise ValueError(
+            f"Checkpoint expects {expected} input planes, but batch has only {actual}. "
+            "Cannot safely synthesize missing observation planes."
+        )
+
     def warmup_graphs(self, max_batch_size):
         """Pre-record CUDA graphs for all bucket sizes up to max_batch_size."""
         if self._graph_inference is not None:
             self._graph_inference.warmup(max_batch_size)
+        elif self._compiled_inference:
+            self._compiled_static_batch_size = max(1, int(max_batch_size))
 
     def set_lr(self, lr):
         """Set learning rate on all optimizer parameter groups."""
@@ -583,6 +911,7 @@ class NNWrapper:
                 canonical = canonical.float().contiguous().to(self.device, non_blocking=self._non_blocking)
                 target_vs = target_vs.float().contiguous().to(self.device, non_blocking=self._non_blocking)
                 target_pis = target_pis.float().contiguous().to(self.device, non_blocking=self._non_blocking)
+                canonical = self._adapt_input_planes(canonical)
 
                 out_v, out_pi = self.nnet(canonical)
                 losses_v.append(self.loss_v(target_vs, out_v))
@@ -601,6 +930,7 @@ class NNWrapper:
                 canonical, target_vs, target_pis = batch
                 canonical = canonical.float().contiguous().to(self.device, non_blocking=self._non_blocking)
                 target_pis = target_pis.float().contiguous().to(self.device, non_blocking=self._non_blocking)
+                canonical = self._adapt_input_planes(canonical)
 
                 out_v, out_pi = self.nnet(canonical)
                 l_pi = self.sample_loss_pi(target_pis, out_pi)
@@ -634,6 +964,7 @@ class NNWrapper:
                 canonical = canonical.float().contiguous().to(self.device, non_blocking=self._non_blocking)
                 target_vs = target_vs.float().contiguous().to(self.device, non_blocking=self._non_blocking)
                 target_pis = target_pis.float().contiguous().to(self.device, non_blocking=self._non_blocking)
+                canonical = self._adapt_input_planes(canonical)
 
                 # reset grad
                 self.optimizer.zero_grad()
@@ -643,6 +974,9 @@ class NNWrapper:
                 l_v = self.loss_v(target_vs, out_v)
                 l_pi = self.loss_pi(target_pis, out_pi)
                 total_loss = l_pi + l_v
+                orth_reg = self.trunk_orth_reg()
+                if not isinstance(orth_reg, int):
+                    total_loss = total_loss + self.orth_reg_lambda * orth_reg
                 total_loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.nnet.parameters(), float('inf'))
                 self.optimizer.step()
@@ -650,6 +984,7 @@ class NNWrapper:
                 v_val = l_v.item()
                 pi_val = l_pi.item()
                 grad_norm_val = grad_norm.item()
+                orth_reg_val = 0.0 if isinstance(orth_reg, int) else orth_reg.item()
 
                 with torch.no_grad():
                     mask = target_pis > 0
@@ -697,6 +1032,13 @@ class NNWrapper:
                     epoch=epoch,
                     step=total_train_steps + current_step,
                 )
+                if self.orth_reg_lambda > 0:
+                    run.track(
+                        orth_reg_val,
+                        name="orth_reg",
+                        epoch=epoch,
+                        step=total_train_steps + current_step,
+                    )
 
                 # record loss and update progress bar.
                 pi_loss += pi_val
@@ -731,6 +1073,7 @@ class NNWrapper:
 
     @tracy_zone
     def process(self, batch):
+        batch = self._adapt_input_planes(batch)
         if self._graph_inference is not None:
             # copy_() into static_input handles dtype conversion implicitly
             res = self._graph_inference(batch.contiguous())
@@ -738,6 +1081,17 @@ class NNWrapper:
                 torch.cuda.synchronize()
             return res
         batch = batch.contiguous().to(self.device, non_blocking=self._non_blocking)
+        actual_bs = batch.shape[0]
+        if self._compiled_inference and actual_bs > 0:
+            bucket = self._compiled_static_batch_size or 1
+            while bucket < actual_bs:
+                bucket *= 2
+            if bucket != actual_bs:
+                padded = torch.zeros(
+                    bucket, *batch.shape[1:], device=batch.device, dtype=batch.dtype
+                )
+                padded[:actual_bs].copy_(batch)
+                batch = padded
         self.nnet.eval()
         with torch.no_grad():
             if self._amp_enabled:
@@ -745,7 +1099,7 @@ class NNWrapper:
                     v, pi = self.nnet(batch)
             else:
                 v, pi = self.nnet(batch)
-            res = (torch.exp(v).float(), torch.exp(pi).float())
+            res = (torch.exp(v[:actual_bs]).float(), torch.exp(pi[:actual_bs]).float())
         # GPU sync for accurate Tracy timing when profiling is enabled
         if alphazero.tracy_is_enabled():
             if self.device.type == 'cuda':
@@ -764,9 +1118,8 @@ class NNWrapper:
         channels — a classic capacity-binding signal in bootstrapped RL
         (Kumar et al. 2021, "Implicit Under-Parameterization in Deep RL").
 
-        Hooks the output of `nnet.conv_layers` (the shared trunk feeding
-        both heads) via a temporary forward hook, so regular forward/predict
-        paths are untouched.
+        Hooks the output of the shared trunk via a temporary forward hook, so
+        regular forward/predict paths are untouched.
 
         Args:
             batch: tensor of canonical-form positions, shape [N, C, H, W].
@@ -781,10 +1134,16 @@ class NNWrapper:
         def _hook(_module, _inputs, outputs):
             captured.append(outputs.detach())
         self.nnet.eval()
-        handle = self.nnet.conv_layers.register_forward_hook(_hook)
+        trunk = getattr(self.nnet, "conv_layers", None)
+        if trunk is None and hasattr(self.nnet, "arch"):
+            trunk = getattr(self.nnet.arch, "macro_blocks", None)
+        if trunk is None:
+            return float('nan')
+        handle = trunk.register_forward_hook(_hook)
         try:
             with torch.no_grad():
                 x = batch.to(self.device, non_blocking=self._non_blocking).float()
+                x = self._adapt_input_planes(x)
                 self.nnet(x)
         finally:
             handle.remove()
@@ -801,13 +1160,26 @@ class NNWrapper:
         return float(((s2.sum() ** 2) / denom).item())
 
     def sample_loss_pi(self, targets, outputs):
-        return -1 * torch.sum(targets * outputs, axis=1)
+        ce = -torch.sum(targets * outputs, axis=1)
+        if self.policy_loss == "kl":
+            entropy = -torch.sum(
+                torch.where(targets > 0, targets * torch.log(targets.clamp_min(1e-12)), torch.zeros_like(targets)),
+                axis=1,
+            )
+            return ce - entropy
+        return ce
 
     def sample_loss_v(self, targets, outputs):
         return -self.cv * torch.sum(targets * outputs, axis=1)
 
     def loss_pi(self, targets, outputs):
-        return -torch.sum(targets * outputs) / targets.size()[0]
+        ce = -torch.sum(targets * outputs) / targets.size()[0]
+        if self.policy_loss == "kl":
+            entropy = -torch.sum(
+                torch.where(targets > 0, targets * torch.log(targets.clamp_min(1e-12)), torch.zeros_like(targets))
+            ) / targets.size()[0]
+            return ce - entropy
+        return ce
 
     def loss_v(self, targets, outputs):
         # return torch.sum((targets - outputs) ** 2) / targets.size()[0]
@@ -827,7 +1199,12 @@ class NNWrapper:
             return 0
         device = self.device
         total = torch.zeros(1, device=device)
-        for m in self.nnet.conv_layers.modules():
+        trunk = getattr(self.nnet, "conv_layers", None)
+        if trunk is None and hasattr(self.nnet, "arch"):
+            trunk = getattr(self.nnet.arch, "macro_blocks", None)
+        if trunk is None:
+            return 0
+        for m in trunk.modules():
             if isinstance(m, nn.Conv2d):
                 W = m.weight.reshape(m.out_channels, -1)  # [out_c, in_c * kh * kw]
                 gram = W @ W.transpose(0, 1)  # [out_c, out_c]
@@ -856,8 +1233,12 @@ class NNWrapper:
             },
             buffer,
         )
-        with open(filepath, 'wb') as f:
+        tmp_filepath = f"{filepath}.tmp-{os.getpid()}"
+        with open(tmp_filepath, 'wb') as f:
             f.write(zstd.ZstdCompressor(level=zstd_level, threads=-1).compress(buffer.getvalue()))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_filepath, filepath)
 
     @staticmethod
     @tracy_zone
@@ -904,6 +1285,23 @@ class NNWrapper:
         args_dict.setdefault("pi_head_convs", 0)
         args_dict.setdefault("v_fc_layers", 1)
         args_dict.setdefault("pi_fc_layers", 0)
+        args_dict.setdefault("uttt_policy_head", "flat")
+        args_dict.setdefault("uttt_destination_context", False)
+        args_dict.setdefault("uttt_macro_channels", -1)
+        args_dict.setdefault("uttt_macro_transformer_layers", 0)
+        args_dict.setdefault("uttt_macro_transformer_heads", 4)
+        args_dict.setdefault("uttt_macro_transformer_ff_mult", 4.0)
+        args_dict.setdefault("uttt_macro_transformer_dropout", 0.0)
+        args_dict.setdefault("optimizer", "sgd")
+        args_dict.setdefault("adamw_beta1", 0.9)
+        args_dict.setdefault("adamw_beta2", 0.999)
+        args_dict.setdefault("adamw_eps", 1e-8)
+        # Older UTTT checkpoints may carry this removed, unrelated option.
+        args_dict.pop("star_gambit_spatial", None)
+        args_dict.setdefault(
+            "input_channels",
+            _infer_input_channels_from_state_dict(checkpoint["state_dict"]),
+        )
 
         args = NNArgs(**args_dict)
 
@@ -915,7 +1313,7 @@ class NNWrapper:
 
 def bench_network():
 
-    Game = alphazero.OpenTaflGS
+    Game = alphazero.UltimateTicTacToeGS
     depth = 4
     channels = 12
     dense_net = True

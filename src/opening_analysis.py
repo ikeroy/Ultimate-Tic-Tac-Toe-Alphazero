@@ -10,7 +10,7 @@ identity hash to produce a narrative (still / deepened / diverged / new / droppe
 
 Usage:
     uv run python src/opening_analysis.py                       # auto-discover
-    uv run python src/opening_analysis.py star_gambit_unified   # pre-fill game
+    uv run python src/opening_analysis.py uttt                  # pre-fill game
     uv run python src/opening_analysis.py --non-interactive     # all defaults
 """
 
@@ -1369,20 +1369,7 @@ def interactive_setup(args) -> Optional[dict]:
             Game = getattr(alphazero, GAME_REGISTRY[variant])
             ui = get_game_ui(game_name)
             print(f"Variant: {game_name}")
-    else:
-        # Non-interactive: pick a deterministic variant for games whose default
-        # constructor would otherwise randomise (e.g. star_gambit_unified).
-        # We use the *_skirmish subclass for unified games — smallest board,
-        # fastest analysis. The user can pre-fill the variant via CLI by
-        # passing e.g. `star_gambit_unified_skirmish` directly as game_or_config.
-        fallback = game_name + "_skirmish"
-        if fallback in GAME_REGISTRY:
-            game_name = fallback
-            Game = getattr(alphazero, GAME_REGISTRY[fallback])
-            ui = get_game_ui(game_name)
-            print(f"Variant (non-interactive default): {game_name}")
-    # The class used for checkpoint loading must match what was trained; for
-    # unified variants, that's the base unified class.
+    # The checkpoint always uses the configured UTTT game class.
     checkpoint_game_class = getattr(alphazero, GAME_REGISTRY[checkpoint_game_name])
 
     # 3. Experiment selection.

@@ -1,6 +1,6 @@
-# AlphaZero Pybind11
+# Ultimate Tic-Tac-Toe AlphaZero
 
-This is a modified implementation of AlphaZero. It takes some inspiration from [Learning From Scratch by Thinking Fast and Slow with Deep Learning and Tree Search](https://davidbarber.github.io/blog/2017/11/07/Learning-From-Scratch-by-Thinking-Fast-and-Slow-with-Deep-Learning-and-Tree-Search/) and some of my own modifications for caching positions. The actual core loops of games and MCTS are implemented in C++ for performance and memory reasons. Python is used for the Neural Network and data packaging.
+This is an AlphaZero implementation for Ultimate Tic-Tac-Toe (UTTT). It takes some inspiration from [Learning From Scratch by Thinking Fast and Slow with Deep Learning and Tree Search](https://davidbarber.github.io/blog/2017/11/07/Learning-From-Scratch-by-Thinking-Fast-and-Slow-with-Deep-Learning-and-Tree-Search/) and includes modifications for caching positions. The core game and MCTS loops are implemented in C++ for performance and memory efficiency; Python handles the neural network and data pipeline.
 
 ## How to Install
 
@@ -46,7 +46,7 @@ All commands use `uv run` to ensure the correct environment is active.
 
 ```bash
 # Start training
-uv run python src/train.py --config configs/connect4.yaml
+uv run python src/train.py --config configs/uttt.yaml
 
 # See all options
 uv run python src/train.py --help

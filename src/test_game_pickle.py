@@ -1,4 +1,4 @@
-"""Pickle round-trip tests for every game state class in the bindings.
+"""Pickle round-trip tests for the Ultimate Tic-Tac-Toe game state.
 
 Verifies that `pickle.dumps(gs)` + `pickle.loads(...)` preserves all
 observable state (canonical form, current player, current turn, valid
@@ -70,32 +70,11 @@ def _round_trip_check(make_gs, *, moves_to_play: int):
 
 
 # ---------------------------------------------------------------------------
-# Test parametrization: every game class in the bindings.
+# Test parametrization.
 # ---------------------------------------------------------------------------
 
-# (label, factory) for each game. Factories avoid eager class lookups so
-# pytest doesn't fail to collect when a binding goes missing.
 ALL_GAMES = [
-    ("Connect4GS",        lambda: alphazero.Connect4GS()),
-    ("OnitamaGS",         lambda: alphazero.OnitamaGS()),
-    ("BrandubhGS",        lambda: alphazero.BrandubhGS()),
-    ("OpenTaflGS",        lambda: alphazero.OpenTaflGS()),
-    ("TawlbwrddGS",       lambda: alphazero.TawlbwrddGS()),
-    ("PhotosynthesisGS2", lambda: alphazero.PhotosynthesisGS2()),
-    ("PhotosynthesisGS3", lambda: alphazero.PhotosynthesisGS3()),
-    ("PhotosynthesisGS4", lambda: alphazero.PhotosynthesisGS4()),
-    ("StarGambitSkirmishGS", lambda: alphazero.StarGambitSkirmishGS()),
-    ("StarGambitShowdownGS", lambda: alphazero.StarGambitShowdownGS()),
-    ("StarGambitClashGS",    lambda: alphazero.StarGambitClashGS()),
-    ("StarGambitBattleGS",   lambda: alphazero.StarGambitBattleGS()),
-    ("StarGambitUnifiedGS-skirmish",
-     lambda: alphazero.StarGambitUnifiedGS(pinned_variant=0)),
-    ("StarGambitUnifiedGS-showdown",
-     lambda: alphazero.StarGambitUnifiedGS(pinned_variant=1)),
-    ("StarGambitUnifiedGS-clash",
-     lambda: alphazero.StarGambitUnifiedGS(pinned_variant=2)),
-    ("StarGambitUnifiedGS-battle",
-     lambda: alphazero.StarGambitUnifiedGS(pinned_variant=3)),
+    ("UltimateTicTacToeGS", lambda: alphazero.UltimateTicTacToeGS()),
 ]
 
 

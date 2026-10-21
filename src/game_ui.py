@@ -94,33 +94,57 @@ class GameUI:
         return None
 
 
+class UltimateTicTacToeUI(GameUI):
+    """Human-facing UTTT moves use base-9 group/cell pairs.
+
+    Internally the engine keeps action IDs as group * 9 + cell. In the play UI,
+    entering "44" means group 4, cell 4, not decimal action 44.
+    """
+
+    def parse_move(self, gs, input_str, valid_moves) -> int | None:
+        text = input_str.strip()
+        if len(text) == 2 and text[0].isdigit() and text[1].isdigit():
+            group = int(text[0])
+            cell = int(text[1])
+            if group < 9 and cell < 9:
+                action = group * 9 + cell
+                if valid_moves[action]:
+                    return action
+            return None
+        if text.startswith("a"):
+            try:
+                action = int(text[1:])
+                if 0 <= action < len(valid_moves) and valid_moves[action]:
+                    return action
+            except ValueError:
+                pass
+        return None
+
+    def format_move(self, gs, action) -> str:
+        group = action // 9
+        cell = action % 9
+        return f"{group}{cell}"
+
+    def get_valid_move_descriptions(self, gs, valid_moves) -> list[tuple[int, str]]:
+        return [
+            (i, self.format_move(gs, i))
+            for i in range(len(valid_moves))
+            if valid_moves[i]
+        ]
+
+    def show_help(self, gs):
+        print("Enter a two-digit base-9 move: <small-board><cell>, e.g. 44.")
+        print("Use a decimal action ID only with an 'a' prefix, e.g. a40.")
+
+
 # Registry mapping game names to UI factory functions.
-# Lazy imports to avoid loading star_gambit_ui unless needed.
-GAME_UI_REGISTRY: dict[str, callable] = {}
-
-
-def _register_star_gambit_uis():
-    """Register Star Gambit UIs lazily."""
-    try:
-        from star_gambit_ui import StarGambitUI, SKIRMISH, SHOWDOWN, CLASH, BATTLE
-        GAME_UI_REGISTRY["star_gambit_skirmish"] = lambda: StarGambitUI(SKIRMISH)
-        GAME_UI_REGISTRY["star_gambit_showdown"] = lambda: StarGambitUI(SHOWDOWN)
-        GAME_UI_REGISTRY["star_gambit_clash"] = lambda: StarGambitUI(CLASH)
-        GAME_UI_REGISTRY["star_gambit_battle"] = lambda: StarGambitUI(BATTLE)
-        # Unified variants all use the BATTLE config (13×13 canvas) with unified=True.
-        GAME_UI_REGISTRY["star_gambit_unified"] = lambda: StarGambitUI(BATTLE, unified=True)
-        GAME_UI_REGISTRY["star_gambit_unified_skirmish"] = lambda: StarGambitUI(BATTLE, unified=True)
-        GAME_UI_REGISTRY["star_gambit_unified_showdown"] = lambda: StarGambitUI(BATTLE, unified=True)
-        GAME_UI_REGISTRY["star_gambit_unified_clash"] = lambda: StarGambitUI(BATTLE, unified=True)
-        GAME_UI_REGISTRY["star_gambit_unified_battle"] = lambda: StarGambitUI(BATTLE, unified=True)
-    except ImportError:
-        pass
+GAME_UI_REGISTRY: dict[str, callable] = {
+    "uttt": UltimateTicTacToeUI,
+}
 
 
 def get_game_ui(game_name: str) -> GameUI:
     """Get the appropriate GameUI for a game name."""
-    if not GAME_UI_REGISTRY:
-        _register_star_gambit_uis()
     if game_name in GAME_UI_REGISTRY:
         return GAME_UI_REGISTRY[game_name]()
     return GameUI()

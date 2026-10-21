@@ -2,13 +2,14 @@
 """Training CLI.
 
 Usage:
-    python src/train.py configs/connect4.yaml
-    python src/train.py configs/star_gambit_skirmish.yaml --iterations 400 --depth 6
-    python src/train.py configs/connect4.yaml --experiment my-experiment-v2
-    python src/train.py --resume data/star_gambit_skirmish/densenet-4d-16c-3k-120sims
-    python src/train.py --resume data/star_gambit_skirmish/densenet-4d-16c-3k-120sims --iterations 600
-    python src/train.py --bootstrap data/star_gambit_skirmish/densenet-4d-16c-3k-120sims
-    python src/train.py --bootstrap data/star_gambit_skirmish/exp1 --channels 32
+    python src/train.py configs/uttt.yaml
+    python src/train.py --config configs/uttt.yaml
+    python src/train.py configs/uttt.yaml --iterations 400 --depth 6
+    python src/train.py configs/uttt.yaml --experiment my-experiment-v2
+    python src/train.py --resume data/uttt/my-experiment-v2
+    python src/train.py --resume data/uttt/my-experiment-v2 --iterations 600
+    python src/train.py --bootstrap data/uttt/my-experiment-v2
+    python src/train.py --bootstrap data/uttt/my-experiment-v2 --channels 32
 """
 
 import argparse
@@ -42,7 +43,7 @@ def parse_args():
         description="AlphaZero Training",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        usage="%(prog)s [-h] [config] [--resume PATH] [--bootstrap PATH] "
+        usage="%(prog)s [-h] [config] [--resume PATH] [--bootstrap PATH] [--init-checkpoint PATH] "
               "[--experiment NAME] [--base-dir DIR] [overrides...]",
     )
     # config is extracted manually from remaining args to avoid
@@ -57,12 +58,20 @@ def parse_args():
         help="Path to source experiment directory to bootstrap from"
     )
     parser.add_argument(
+        "--init-checkpoint", default=None, metavar="PATH",
+        help="Checkpoint used as iteration zero for a new config-based experiment"
+    )
+    parser.add_argument(
         "--experiment", default=None, metavar="NAME",
         help="Explicit experiment name (overrides auto-generated name)"
     )
     parser.add_argument(
         "--base-dir", default="data", metavar="DIR",
         help="Base data directory (default: data)"
+    )
+    parser.add_argument(
+        "--config", default=None, metavar="PATH",
+        help="Path to training config YAML"
     )
 
     args, remaining = parser.parse_known_args()
@@ -84,8 +93,11 @@ def parse_args():
             non_flag.append(remaining[i])
             i += 1
 
-    # First non-flag leftover is the config path
-    args.config = non_flag[0] if non_flag else None
+    # First non-flag leftover is the config path when --config isn't used.
+    positional_config = non_flag[0] if non_flag else None
+    if args.config and positional_config:
+        parser.error("specify config either as a positional argument or with --config, not both")
+    args.config = args.config or positional_config
     for extra in non_flag[1:]:
         print(f"Warning: ignoring unexpected argument: {extra}")
 
@@ -120,6 +132,9 @@ def main():
         sys.exit(1)
     if modes == 0:
         print("Error: must specify a config file, --resume <dir>, or --bootstrap <dir>")
+        sys.exit(1)
+    if args.init_checkpoint and (args.resume or args.bootstrap):
+        print("Error: --init-checkpoint can only be used with a new config-based experiment")
         sys.exit(1)
 
     if args.resume:
@@ -176,6 +191,9 @@ def main():
         if not os.path.exists(args.config):
             print(f"Error: config file not found: {args.config}")
             sys.exit(1)
+        if args.init_checkpoint and not os.path.isfile(args.init_checkpoint):
+            print(f"Error: initial checkpoint not found: {args.init_checkpoint}")
+            sys.exit(1)
 
         config = load_config(args.config, overrides)
         experiment_dir = config.resolve_experiment_dir(
@@ -212,7 +230,13 @@ def main():
         print(f"Bootstrap from: {bootstrap_from}")
     print()
 
-    game_runner.main(config, experiment_dir, start=start, bootstrap_from=bootstrap_from)
+    game_runner.main(
+        config,
+        experiment_dir,
+        start=start,
+        bootstrap_from=bootstrap_from,
+        initial_checkpoint=args.init_checkpoint or "",
+    )
 
 
 if __name__ == "__main__":

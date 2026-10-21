@@ -18,6 +18,7 @@
 namespace alphazero {
 
 enum class EvalType : uint8_t { NN = 0, RANDOM = 1, PLAYOUT = 2 };
+enum class HistoryValueTarget : uint8_t { FINAL = 0, ROOT = 1 };
 
 using Cache = ShardedS3FIFOCache;
 
@@ -69,6 +70,7 @@ struct PlayParams {
   // variant id; falls back to the scalar otherwise.
   std::vector<float> temp_decay_half_life_by_variant{};
   bool history_enabled = false;
+  HistoryValueTarget history_value_target = HistoryValueTarget::FINAL;
   bool self_play = false;
   bool tree_reuse = true;
   float epsilon = 0.0;

@@ -1,19 +1,63 @@
-.vscode
-
-.aim
-.venv
-.cache
-
-.envrc
+# Editors and operating systems
+.vscode/
+.idea/
 .DS_Store
+*.swp
+*.swo
+*~
 
+# Local environments and secrets
+.envrc
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+.conda/
+.direnv/
+
+# Python caches, tests, and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+wheelhouse/
+*.egg-info/
+
+# Native and Meson build output
+/build/
+/builddir/
+meson-logs/
+meson-private/
+compile_commands.json
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Downloaded Meson subprojects; keep reproducible wrap definitions
+/subprojects/*
+!/subprojects/*.wrap
+
+# Profiling and experiment artifacts
 mprofile_*
-
-build
-builddir
-data
-runs
-subprojects/*
-!subprojects/*.wrap
-
-__pycache__
+*.prof
+/.aim/
+/data/
+/runs/
+/logs/
+/models/
+/export/

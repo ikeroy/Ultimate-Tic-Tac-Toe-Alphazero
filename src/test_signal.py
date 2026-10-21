@@ -38,8 +38,8 @@ class _PmWrap:
 
 
 def _make_pm(num_games=1_000_000, mcts_visits=8):
-    Game = alphazero.Connect4GS
-    params = base_params(TrainConfig(game="connect4"), 0.5, 4, 2)
+    Game = alphazero.UltimateTicTacToeGS
+    params = base_params(TrainConfig(game="uttt"), 0.5, 4, 2)
     params.max_cache_size = 0
     params.games_to_play = num_games
     params.concurrent_games = 16

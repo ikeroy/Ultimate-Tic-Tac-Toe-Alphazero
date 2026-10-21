@@ -14,10 +14,8 @@ diverse enough to be informative.
 
 Snapshot generation: when an anchor is hit and no snapshot exists, load the
 anchor checkpoint and run a brief burst of self-play with it to capture
-~`frozen_eval_positions` game states total, sampled across variants in
-proportion to `variant_fractions`. Game states are pickled directly to a
-permanent location outside the reservoir — all 17 game classes implement
-`py::pickle` via `to_bytes/from_bytes` on the GameState interface.
+~`frozen_eval_positions` game states. Game states are pickled directly to a
+permanent location outside the reservoir.
 """
 
 import glob
@@ -33,9 +31,6 @@ import torch
 from tqdm import tqdm
 
 import alphazero
-
-
-UNIFIED_VARIANT_NAMES = ["skirmish", "showdown", "clash", "battle"]
 
 
 def frozen_set_dir(paths: dict, anchor_iter: int) -> str:
@@ -129,21 +124,9 @@ def _make_base_mcts(config, Game):
     )
 
 
-def _make_game_for_variant(config, variant_id: Optional[int]):
-    """Create a game state, optionally forcing a variant for unified games.
-
-    variant_id is 0..3 for unified games, None otherwise.
-    """
-    Game = config.Game
-    if config.game == "star_gambit_unified" and variant_id is not None:
-        probs = [0.0] * 4
-        probs[variant_id] = 1.0
-        return Game(probs=probs)
-    return Game()
-
-
-def _is_unified(config) -> bool:
-    return config.game == "star_gambit_unified"
+def _make_game(config):
+    """Create a fresh UTTT game state."""
+    return config.Game()
 
 
 def linfit_slope(pts) -> float:
@@ -274,28 +257,8 @@ def read_bootstrap_fallback(experiment_dir: str) -> Optional[str]:
 
 
 def _variant_targets(config, total: int) -> dict:
-    """Per-variant target counts {variant_id: count} summing to total.
-
-    For non-unified games, returns {None: total}.
-    """
-    if not _is_unified(config) or not config.variant_fractions:
-        return {None: total}
-    # Normalize fractions in case they don't quite sum to 1.0
-    raw = {
-        UNIFIED_VARIANT_NAMES.index(name): float(frac)
-        for name, frac in config.variant_fractions.items()
-        if name in UNIFIED_VARIANT_NAMES
-    }
-    s = sum(raw.values()) or 1.0
-    raw = {vid: f / s for vid, f in raw.items()}
-    targets = {vid: int(round(total * frac)) for vid, frac in raw.items()}
-    # Fix rounding drift
-    diff = total - sum(targets.values())
-    if diff != 0 and targets:
-        # Give extra/short to the largest bucket
-        largest = max(targets, key=lambda k: targets[k])
-        targets[largest] += diff
-    return {vid: c for vid, c in targets.items() if c > 0}
+    """Return the UTTT snapshot target count."""
+    return {None: total}
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +267,9 @@ def _variant_targets(config, total: int) -> dict:
 
 def _resolve_anchor_checkpoint(paths: dict, experiment_name: str, anchor_iter: int):
     """Load the anchor checkpoint, or return None if not yet on disk."""
-    import neural_net
     path = os.path.join(paths["checkpoint"], f"{anchor_iter:04d}-{experiment_name}.pt")
     if not os.path.isfile(path):
         return None
-    Game_cls = None  # will be set by caller; just verify file exists here
     return path
 
 
@@ -364,7 +325,7 @@ def _burst_capture_one_variant(config, anchor_nn, variant_id: Optional[int],
                        f"may be small. Proceeding with what we have.")
             break
 
-        gs = _make_game_for_variant(config, variant_id)
+        gs = _make_game(config)
         mcts = _make_base_mcts(config, Game)
         move_number = 0
 
@@ -461,11 +422,7 @@ def ensure_snapshot(config, paths: dict, experiment_name: str,
     for variant_id, count in targets.items():
         if count <= 0:
             continue
-        label = (
-            f"variant {UNIFIED_VARIANT_NAMES[variant_id]}"
-            if variant_id is not None else "default"
-        )
-        tqdm.write(f"    Generating {count} positions ({label}) at {visits} visits "
+        tqdm.write(f"    Generating {count} positions at {visits} visits "
                    f"(min {min_games} games) ...")
         states = _burst_capture_one_variant(
             config, nn, variant_id, count, visits, min_games,
@@ -718,8 +675,7 @@ def evaluate_checkpoint(nn, config, paths: dict, anchor_iter: int) -> dict:
     """Evaluate the given current-iter NN on the frozen state set.
 
     Returns:
-      {variant_name: {metric_name: float}} aggregated across all states in
-      that variant. Non-unified games report under key "default".
+      {"default": {metric_name: float}} aggregated across all states.
       Empty dict if no snapshot exists.
     """
     if not snapshot_exists(paths, anchor_iter):
@@ -740,7 +696,7 @@ def evaluate_checkpoint(nn, config, paths: dict, anchor_iter: int) -> dict:
 
     results = {}
     for vid, rows in by_variant.items():
-        name = UNIFIED_VARIANT_NAMES[vid] if vid is not None else "default"
+        name = "default"
         results[name] = {
             "kl_mcts_net": float(np.mean([r["kl_mcts_net"] for r in rows])),
             "value_mae": float(np.mean([r["value_mae"] for r in rows])),

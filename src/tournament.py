@@ -3,16 +3,16 @@
 
 Usage:
     # Interactive mode (fallback to network_selector)
-    python src/tournament.py --game connect4 --format monrad
+    python src/tournament.py --game uttt --format monrad
 
     # Directory-based selection
-    python src/tournament.py --game star_gambit_skirmish --format monrad \
-      --dir data/star_gambit_skirmish/densenet-4d-16c-3k-300sims --count 10
+    python src/tournament.py --game uttt --format monrad \
+      --dir data/uttt/my-experiment --count 10
 
     # Multiple experiments + special agents
-    python src/tournament.py --game connect4 --format roundrobin \
-      --dir data/connect4/exp1 --count 5 \
-      --dir data/connect4/exp2 --count 3 \
+    python src/tournament.py --game uttt --format roundrobin \
+      --dir data/uttt/exp1 --count 5 \
+      --dir data/uttt/exp2 --count 3 \
       --random --playout --mcts_visits 200 --batch_size 64
 """
 
@@ -24,7 +24,10 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SRC_DIR)
+sys.path.insert(0, SRC_DIR)
+sys.path.insert(0, ROOT_DIR)
 
 import numpy as np
 import tqdm
@@ -52,6 +55,8 @@ from network_selector import (
 from tracy_utils import tracy_zone
 
 np.set_printoptions(precision=3, suppress=True)
+
+UTTT_AI_AGENT = "uttt-ai"
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +102,14 @@ def pit_agents(config, Game, players, mcts_visits, bs, name,
                player_gumbel_c_visit=None, player_gumbel_c_scale=None,
                player_gumbel_full=None,
                tree_reuse=True, cache_size=0, caches=None,
-               variant_probs=None, return_per_variant=False):
+               variant_probs=None, return_per_variant=False,
+               games_to_play=None):
     """Play agents against each other across all seat permutations in one run.
 
     Args:
         caches: optional list of shared_ptr<ShardedS3FIFOCache> per model group.
                 When provided, cache_size is ignored (set to 0 internally).
-        variant_probs: optional [skirmish, showdown, clash, battle] weights
-                for star_gambit_unified games. None / non-unified games
-                ignore this and use the default constructor.
+        variant_probs: retained for API compatibility; ignored by UTTT.
         return_per_variant: if True and the game tracks variants (unified),
                 also returns per-variant per-player win rates as a dict
                 {variant_id: [wr_per_player]}.
@@ -188,7 +192,7 @@ def pit_agents(config, Game, players, mcts_visits, bs, name,
     if player_gumbel_full is not None:
         params.seat_gumbel_full = _rotate_per_seat(player_gumbel_full, int)
 
-    n = bs * cb * num_players  # all perms at once
+    n = games_to_play if games_to_play is not None else bs * cb * num_players
     params.games_to_play = n
     set_eval_types(params, players)
 
@@ -202,10 +206,7 @@ def pit_agents(config, Game, players, mcts_visits, bs, name,
             seen_groups[g] = i
         unique_players[i] = players[seen_groups[g]]
 
-    if variant_probs is not None and getattr(config, "game", None) == "star_gambit_unified":
-        base_game = Game(probs=list(variant_probs))
-    else:
-        base_game = Game()
+    base_game = Game()
     if caches is not None:
         pm = alphazero.PlayManager(base_game, params, caches=caches)
     else:
@@ -356,6 +357,19 @@ def load_agent(Game, agent_name, model_path, mcts_visits, rand_agents, nn_cache=
     """
     if agent_name == "playout":
         return PlayoutPlayer(), mcts_visits
+    if agent_name == UTTT_AI_AGENT:
+        from tools.uttt_ai_adapter import UtttAiPolicyValueNet, default_model_path
+
+        if nn_cache is not None and UTTT_AI_AGENT in nn_cache:
+            return nn_cache[UTTT_AI_AGENT], mcts_visits
+        require_cuda = os.environ.get("UTTT_AI_REQUIRE_CUDA") == "1"
+        nn = UtttAiPolicyValueNet(
+            os.environ.get("UTTT_AI_MODEL", default_model_path()),
+            require_cuda=require_cuda,
+        )
+        if nn_cache is not None:
+            nn_cache[UTTT_AI_AGENT] = nn
+        return nn, mcts_visits
     if agent_name in rand_agents:
         return RandPlayer(), agent_name
     path = _agent_path(agent_name) or agent_name
@@ -383,6 +397,8 @@ def _is_nn_agent(agent_name, rand_agents):
     """Return True if agent_name refers to a neural network agent."""
     if agent_name == "dummy" or agent_name == "playout":
         return False
+    if agent_name == UTTT_AI_AGENT:
+        return False
     if isinstance(agent_name, (int, float)) or agent_name in rand_agents:
         return False
     return True
@@ -397,7 +413,7 @@ def _agent_path(agent_name):
     """
     if not isinstance(agent_name, str):
         return None
-    if agent_name in ("playout", "dummy"):
+    if agent_name in ("playout", "dummy", UTTT_AI_AGENT):
         return None
     path, _ = parse_network_spec(agent_name)
     return path
@@ -407,7 +423,7 @@ def _agent_override(agent_name):
     """Return the explicit per-agent algorithm override ('puct'/'gumbel') or None."""
     if not isinstance(agent_name, str):
         return None
-    if agent_name in ("playout", "dummy"):
+    if agent_name in ("playout", "dummy", UTTT_AI_AGENT):
         return None
     _, override = parse_network_spec(agent_name)
     return override
@@ -443,7 +459,7 @@ def _build_matchup_caches(Game, agents, players, model_groups, cache_dict):
 
 
 def run_monrad(config, Game, agents, mcts_visits, bs, model_path, rand_agents, cache_size=0,
-               global_algo=None):
+               global_algo=None, games_to_play=None):
     """Run a Monrad (Swiss-style) tournament.
 
     ``global_algo`` ('puct'/'gumbel' or None) is applied to NN agents that do
@@ -574,6 +590,7 @@ def run_monrad(config, Game, agents, mcts_visits, bs, model_path, rand_agents, c
                     f"{_agent_label(agents[i])}-{_agent_label(agents[j])}",
                     cache_size=0 if matchup_caches else cache_size,
                     caches=matchup_caches,
+                    games_to_play=games_to_play,
                     **gumbel_kwargs,
                 )
 
@@ -608,7 +625,7 @@ def _player_groups(players):
 
 
 def run_roundrobin(config, Game, agents, mcts_visits, bs, model_path, rand_agents, cache_size=0,
-                   global_algo=None):
+                   global_algo=None, games_to_play=None):
     """Run a round-robin tournament.
 
     ``global_algo`` ('puct'/'gumbel' or None) is applied to NN agents that do
@@ -666,6 +683,7 @@ def run_roundrobin(config, Game, agents, mcts_visits, bs, model_path, rand_agent
                     f"{_agent_label(agents[i])}-{_agent_label(agents[j])}",
                     cache_size=0 if matchup_caches else cache_size,
                     caches=matchup_caches,
+                    games_to_play=games_to_play,
                     **gumbel_kwargs,
                 )
 
@@ -696,6 +714,7 @@ def run_roundrobin(config, Game, agents, mcts_visits, bs, model_path, rand_agent
                     f"{_agent_label(agents[j])}-{_agent_label(agents[i])}",
                     cache_size=0 if matchup_caches2 else cache_size,
                     caches=matchup_caches2,
+                    games_to_play=games_to_play,
                     **gumbel_kwargs2,
                 )
 
@@ -881,7 +900,7 @@ def parse_args():
         help="Experiment directory to load checkpoints from (can repeat). "
              "Accepts an optional ':puct'/':gumbel'/':auto' suffix that is "
              "applied to every checkpoint selected from this directory, e.g. "
-             "'data/connect4/exp1:gumbel'. Per-network ':algo' on --networks "
+             "'data/uttt/exp1:gumbel'. Per-network ':algo' on --networks "
              "still wins for that one network.",
     )
     parser.add_argument(
@@ -894,10 +913,31 @@ def parse_args():
     parser.add_argument("--random", action="store_true", help="Include random agent")
     parser.add_argument("--playout", action="store_true", help="Include playout agent")
     parser.add_argument(
+        "--uttt-ai",
+        action="store_true",
+        help="Include the local uttt.ai ONNX policy/value model as an agent",
+    )
+    parser.add_argument(
+        "--uttt-ai-model",
+        default="/tmp/policy_value_net_stage2.onnx",
+        help="Path to the uttt.ai policy_value_net_stage2.onnx model",
+    )
+    parser.add_argument(
+        "--uttt-ai-require-cuda",
+        action="store_true",
+        help="Fail instead of falling back to CPU if uttt.ai ONNX CUDA inference is unavailable",
+    )
+    parser.add_argument(
         "--mcts_visits", type=int, default=200, help="MCTS visits (default: 200)"
     )
     parser.add_argument(
         "--batch_size", type=int, default=64, help="Games per position (default: 64)"
+    )
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=None,
+        help="Total games per matchup. Defaults to batch_size * compare_batch_size * players.",
     )
     parser.add_argument(
         "--base-dir", default="data", help="Base data directory (default: data)"
@@ -938,6 +978,7 @@ def main():
     agents = []
     rand_agents = []
     model_path = None
+    special_agent_count = int(args.random) + int(args.playout) + int(args.uttt_ai)
 
     if args.networks:
         for spec in args.networks:
@@ -978,7 +1019,7 @@ def main():
 
         # Use first dir's checkpoint for model_path fallback
         model_path = os.path.join(first_dir_path, "checkpoint")
-    else:
+    elif not args.networks and special_agent_count < 2:
         # Interactive selection via network_selector. After each batch the
         # user is asked once for an algorithm override applied to that batch.
         game_dir = os.path.join(args.base_dir, args.game)
@@ -1037,6 +1078,18 @@ def main():
             sys.exit(1)
 
     # Add special agents
+    if args.uttt_ai:
+        if args.game != "uttt":
+            print("--uttt-ai is only available with --game uttt")
+            sys.exit(1)
+        if not os.path.exists(args.uttt_ai_model):
+            print(f"uttt.ai ONNX model not found: {args.uttt_ai_model}")
+            print("Expected policy_value_net_stage2.onnx; set --uttt-ai-model to its path.")
+            sys.exit(1)
+        os.environ["UTTT_AI_MODEL"] = args.uttt_ai_model
+        if args.uttt_ai_require_cuda:
+            os.environ["UTTT_AI_REQUIRE_CUDA"] = "1"
+        agents = [UTTT_AI_AGENT] + agents
     if args.random:
         rand_agents = [args.mcts_visits]
         agents = rand_agents + agents
@@ -1055,6 +1108,8 @@ def main():
     print(f"\n=== {args.game} {args.format.capitalize()} Tournament ===")
     print(f"MCTS visits: {args.mcts_visits}")
     print(f"Batch size: {args.batch_size}")
+    if args.games is not None:
+        print(f"Games per matchup: {args.games}")
     print(f"Agents ({len(agents)}):")
     for a in agents:
         print(f"  {_agent_label(a)}")
@@ -1087,12 +1142,12 @@ def main():
     if args.format == "monrad":
         agents, elo, win_matrix = run_monrad(
             config, Game, agents, args.mcts_visits, args.batch_size, model_path, rand_agents,
-            cache_size=args.cache_size, global_algo=global_algo,
+            cache_size=args.cache_size, global_algo=global_algo, games_to_play=args.games,
         )
     else:
         agents, elo, win_matrix = run_roundrobin(
             config, Game, agents, args.mcts_visits, args.batch_size, model_path, rand_agents,
-            cache_size=args.cache_size, global_algo=global_algo,
+            cache_size=args.cache_size, global_algo=global_algo, games_to_play=args.games,
         )
 
     # Print results

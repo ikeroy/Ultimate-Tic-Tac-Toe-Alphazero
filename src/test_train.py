@@ -30,46 +30,27 @@ FAST_OVERRIDES = {
     "gate_compare_batch_size": "4",
     "max_cache_size": "0",
     "hist_size": "1000",
+    "loader_threads": "0",
 }
 
 
-def test_e2e_training_connect4(tmp_path):
-    """Full training loop for Connect4: create net -> self-play -> train -> gate."""
+def test_e2e_training_uttt(tmp_path):
+    """Full UTTT training loop: create net -> self-play -> train -> gate."""
     import game_runner
 
     config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "2"},
     )
-    experiment_dir = str(tmp_path / "data" / "connect4" / "test")
+    experiment_dir = str(tmp_path / "data" / "uttt" / "test")
     aim_repo = str(tmp_path / "aim")
     game_runner.main(config, experiment_dir, aim_repo=aim_repo)
 
     # Verify outputs
-    checkpoint_dir = tmp_path / "data" / "connect4" / "test" / "checkpoint"
+    checkpoint_dir = tmp_path / "data" / "uttt" / "test" / "checkpoint"
     assert checkpoint_dir.exists()
     pt_files = list(checkpoint_dir.glob("*.pt"))
     assert len(pt_files) >= 2, f"Expected at least 2 checkpoints, got {len(pt_files)}"
-
-
-def test_e2e_training_star_gambit(tmp_path):
-    """Full training loop for Star Gambit Skirmish."""
-    import game_runner
-
-    config = load_config(
-        os.path.join(CONFIGS_DIR, "star_gambit_skirmish.yaml"),
-        {**FAST_OVERRIDES, "iterations": "2"},
-    )
-    experiment_dir = str(tmp_path / "data" / "star_gambit_skirmish" / "test")
-    aim_repo = str(tmp_path / "aim")
-    game_runner.main(config, experiment_dir, aim_repo=aim_repo)
-
-    checkpoint_dir = (
-        tmp_path / "data" / "star_gambit_skirmish" / "test" / "checkpoint"
-    )
-    assert checkpoint_dir.exists()
-    pt_files = list(checkpoint_dir.glob("*.pt"))
-    assert len(pt_files) >= 2
 
 
 def test_config_saved_to_experiment_dir(tmp_path):
@@ -77,17 +58,17 @@ def test_config_saved_to_experiment_dir(tmp_path):
     import game_runner
 
     config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "1"},
     )
-    experiment_dir = str(tmp_path / "data" / "connect4" / "test")
+    experiment_dir = str(tmp_path / "data" / "uttt" / "test")
     aim_repo = str(tmp_path / "aim")
     game_runner.main(config, experiment_dir, aim_repo=aim_repo)
 
-    config_path = tmp_path / "data" / "connect4" / "test" / "config.yaml"
+    config_path = tmp_path / "data" / "uttt" / "test" / "config.yaml"
     assert config_path.exists()
     reloaded = load_config(str(config_path), {})
-    assert reloaded.game == "connect4"
+    assert reloaded.game == "uttt"
 
 
 def test_bootstrap_same_arch(tmp_path):
@@ -101,43 +82,43 @@ def test_bootstrap_same_arch(tmp_path):
 
     # --- Phase 1: Create source experiment (2 iterations) ---
     source_config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "2"},
     )
-    source_dir = str(tmp_path / "data" / "connect4" / "source")
+    source_dir = str(tmp_path / "data" / "uttt" / "source")
     game_runner.main(source_config, source_dir, aim_repo=aim_repo)
 
     # Verify source produced expected artifacts
-    source_ckpt = tmp_path / "data" / "connect4" / "source" / "checkpoint"
+    source_ckpt = tmp_path / "data" / "uttt" / "source" / "checkpoint"
     assert source_ckpt.exists()
     source_pts = sorted(source_ckpt.glob("*.pt"))
     assert len(source_pts) >= 2, f"Source needs >= 2 checkpoints, got {len(source_pts)}"
-    source_elo = tmp_path / "data" / "connect4" / "source" / "elo.csv"
+    source_elo = tmp_path / "data" / "uttt" / "source" / "elo.csv"
     assert source_elo.exists(), "Source must have elo.csv"
 
     # --- Phase 2: Bootstrap new experiment from source ---
     bootstrap_config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {
             **FAST_OVERRIDES,
             "iterations": "4",  # Will run iterations 2 & 3 after bootstrap at iter 2
         },
     )
-    new_dir = str(tmp_path / "data" / "connect4" / "bootstrapped")
+    new_dir = str(tmp_path / "data" / "uttt" / "bootstrapped")
     game_runner.main(bootstrap_config, new_dir, aim_repo=aim_repo, bootstrap_from=source_dir)
 
     # --- Phase 3: Verify bootstrap artifacts ---
-    new_ckpt = tmp_path / "data" / "connect4" / "bootstrapped" / "checkpoint"
+    new_ckpt = tmp_path / "data" / "uttt" / "bootstrapped" / "checkpoint"
     assert new_ckpt.exists()
     new_pts = list(new_ckpt.glob("*.pt"))
     # Should have: initial + copied source + newly trained ones
     assert len(new_pts) >= 3, f"Expected >= 3 checkpoints, got {len(new_pts)}"
 
-    new_config_path = tmp_path / "data" / "connect4" / "bootstrapped" / "config.yaml"
+    new_config_path = tmp_path / "data" / "uttt" / "bootstrapped" / "config.yaml"
     assert new_config_path.exists()
 
     # elo.csv should exist with data from source + new iterations
-    new_elo = tmp_path / "data" / "connect4" / "bootstrapped" / "elo.csv"
+    new_elo = tmp_path / "data" / "uttt" / "bootstrapped" / "elo.csv"
     assert new_elo.exists()
 
 
@@ -153,21 +134,21 @@ def test_bootstrap_diff_arch(tmp_path):
 
     # --- Phase 1: Create source experiment (2 iterations) ---
     source_config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "2"},
     )
-    source_dir = str(tmp_path / "data" / "connect4" / "source")
+    source_dir = str(tmp_path / "data" / "uttt" / "source")
     game_runner.main(source_config, source_dir, aim_repo=aim_repo)
 
     # Verify source produced expected artifacts
-    source_ckpt = tmp_path / "data" / "connect4" / "source" / "checkpoint"
+    source_ckpt = tmp_path / "data" / "uttt" / "source" / "checkpoint"
     assert source_ckpt.exists()
     source_pts = sorted(source_ckpt.glob("*.pt"))
     assert len(source_pts) >= 2, f"Source needs >= 2 checkpoints, got {len(source_pts)}"
 
     # --- Phase 2: Bootstrap with different architecture (more channels) ---
     bootstrap_config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {
             **FAST_OVERRIDES,
             "iterations": "4",
@@ -175,11 +156,11 @@ def test_bootstrap_diff_arch(tmp_path):
             "bootstrap_eval_interval": "50",
         },
     )
-    new_dir = str(tmp_path / "data" / "connect4" / "bootstrapped-diff")
+    new_dir = str(tmp_path / "data" / "uttt" / "bootstrapped-diff")
     game_runner.main(bootstrap_config, new_dir, aim_repo=aim_repo, bootstrap_from=source_dir)
 
     # --- Phase 3: Verify artifacts ---
-    new_ckpt = tmp_path / "data" / "connect4" / "bootstrapped-diff" / "checkpoint"
+    new_ckpt = tmp_path / "data" / "uttt" / "bootstrapped-diff" / "checkpoint"
     assert new_ckpt.exists()
     new_pts = list(new_ckpt.glob("*.pt"))
     # Should have: initial (0000) + retrained (source_n) + newly trained
@@ -193,11 +174,11 @@ def test_bootstrap_diff_arch(tmp_path):
             f"Foreign checkpoint found: {pt.name} (expected all to contain '{new_exp_name}')"
 
     # elo.csv should exist
-    new_elo = tmp_path / "data" / "connect4" / "bootstrapped-diff" / "elo.csv"
+    new_elo = tmp_path / "data" / "uttt" / "bootstrapped-diff" / "elo.csv"
     assert new_elo.exists()
 
     # config.yaml should exist
-    new_config_path = tmp_path / "data" / "connect4" / "bootstrapped-diff" / "config.yaml"
+    new_config_path = tmp_path / "data" / "uttt" / "bootstrapped-diff" / "config.yaml"
     assert new_config_path.exists()
 
 
@@ -215,10 +196,10 @@ def test_resume_iterations_less_than_checkpoint(tmp_path):
     # Create a 2-iteration experiment
     import game_runner
     config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "2"},
     )
-    exp_dir = str(tmp_path / "data" / "connect4" / "test-resume")
+    exp_dir = str(tmp_path / "data" / "uttt" / "test-resume")
     game_runner.main(config, exp_dir, aim_repo=aim_repo)
 
     # Verify checkpoint at iter 2 exists
@@ -229,7 +210,7 @@ def test_resume_iterations_less_than_checkpoint(tmp_path):
 
     # Now try to resume with iterations <= latest checkpoint
     result = subprocess.run(
-        ["python", "src/train.py", "--resume", exp_dir, "--iterations", "1"],
+        [sys.executable, "src/train.py", "--resume", exp_dir, "--iterations", "1"],
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(__file__)),
     )
     assert result.returncode != 0
@@ -244,10 +225,10 @@ def test_resume_iterations_greater_than_checkpoint(tmp_path):
 
     # Create a 1-iteration experiment
     config = load_config(
-        os.path.join(CONFIGS_DIR, "connect4.yaml"),
+        os.path.join(CONFIGS_DIR, "uttt.yaml"),
         {**FAST_OVERRIDES, "iterations": "1"},
     )
-    exp_dir = str(tmp_path / "data" / "connect4" / "test-resume-ok")
+    exp_dir = str(tmp_path / "data" / "uttt" / "test-resume-ok")
     game_runner.main(config, exp_dir, aim_repo=aim_repo)
 
     # Resume with more iterations should work

@@ -32,80 +32,20 @@ endif
 
 lib_args = ['-DBUILDLIB'] + tracy_args
 
-tafl_helper_test = executable(
-  'tafl_helper_test',
-  'tafl_helper_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [],
-)
-test('gtest tests', tafl_helper_test)
-
-brandubh_gs = library(
-    'brandubh_gs',
-    'brandubh_gs.cc',
-    dependencies: [eigen_dep, absl_hash_dep, absl_container_dep],
-    cpp_args: lib_args,
-)
-
-brandubh_gs_test = executable(
-  'brandubh_gs_test',
-  'brandubh_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [brandubh_gs],
-)
-test('gtest tests', brandubh_gs_test)
-
-opentafl_gs = library(
-    'opentafl_gs',
-    'opentafl_gs.cc',
-    dependencies: [eigen_dep, absl_hash_dep, absl_container_dep],
-    cpp_args: lib_args,
-)
-
-opentafl_gs_test = executable(
-  'opentafl_gs_test',
-  'opentafl_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [opentafl_gs],
-)
-test('gtest tests', opentafl_gs_test)
-
-tawlbwrdd_gs = library(
-    'tawlbwrdd_gs',
-    'tawlbwrdd_gs.cc',
-    dependencies: [eigen_dep, absl_hash_dep, absl_container_dep],
-    cpp_args: lib_args,
-)
-
-tawlbwrdd_gs_test = executable(
-  'tawlbwrdd_gs_test',
-  'tawlbwrdd_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [tawlbwrdd_gs],
-)
-test('gtest tests', tawlbwrdd_gs_test)
-
-onitama_gs = library(
-    'onitama_gs',
-    'onitama_gs.cc',
-    dependencies: [eigen_dep, absl_hash_dep, absl_container_dep],
-    cpp_args: lib_args,
-)
-
-connect4_gs = library(
-    'connect4_gs',
-    'connect4_gs.cc',
+uttt_gs = library(
+    'uttt_gs',
+    'uttt_gs.cc',
     dependencies: [eigen_dep, absl_hash_dep],
     cpp_args: lib_args,
 )
 
-connect4_gs_test = executable(
-  'connect4_gs_test',
-  'connect4_gs_test.cc',
+uttt_gs_test = executable(
+  'uttt_gs_test',
+  'uttt_gs_test.cc',
   dependencies: [gtest_dep, eigen_dep, absl_hash_dep],
-  link_with: [connect4_gs],
+  link_with: [uttt_gs],
 )
-test('gtest tests', connect4_gs_test)
+test('gtest tests', uttt_gs_test)
 
 mcts = library(
     'mcts',
@@ -121,41 +61,11 @@ game_state_lib = library(
   cpp_args: lib_args,
 )
 
-star_gambit_gs = library(
-    'star_gambit_gs',
-    'star_gambit_gs.cc',
-    dependencies: [eigen_dep, absl_hash_dep, absl_container_dep, tracy_dep],
-    cpp_args: lib_args,
-)
-
-star_gambit_gs_test = executable(
-  'star_gambit_gs_test',
-  'star_gambit_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [star_gambit_gs, mcts],
-)
-test('gtest tests', star_gambit_gs_test)
-
-star_gambit_unified_gs_test = executable(
-  'star_gambit_unified_gs_test',
-  'star_gambit_unified_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep, absl_container_dep],
-  link_with: [star_gambit_gs, mcts],
-)
-test('gtest tests', star_gambit_unified_gs_test)
-
-photosynthesis_gs_test = executable(
-  'photosynthesis_gs_test',
-  'photosynthesis_gs_test.cc',
-  dependencies: [gtest_dep, eigen_dep, absl_hash_dep],
-)
-test('gtest tests', photosynthesis_gs_test)
-
 mcts_test = executable(
   'mcts_test',
   'mcts_test.cc',
   dependencies: [gtest_dep, eigen_dep, absl_hash_dep],
-  link_with: [mcts, connect4_gs, game_state_lib],
+  link_with: [mcts, uttt_gs, game_state_lib],
 )
 test('gtest tests', mcts_test)
 
@@ -187,7 +97,7 @@ play_manager_test = executable(
   'play_manager_test',
   'play_manager_test.cc',
   dependencies: [gtest_dep, eigen_dep, absl_container_dep, absl_hash_dep],
-  link_with: [play_manager, connect4_gs],
+  link_with: [play_manager, uttt_gs],
 )
 test('gtest tests', play_manager_test)
 
@@ -195,13 +105,13 @@ play_manager_bench = executable(
   'play_manager_bench',
   'play_manager_bench.cc',
   dependencies: [gbench_main_dep, gbench_dep, thread_dep, eigen_dep, absl_container_dep, absl_hash_dep],
-  link_with: [play_manager, tawlbwrdd_gs],
+  link_with: [play_manager, uttt_gs],
 )
 
 py3_install.extension_module(
   'alphazero',
   sources: ['py_wrapper.cc'],
-  link_with: [connect4_gs, onitama_gs, brandubh_gs, opentafl_gs, tawlbwrdd_gs, star_gambit_gs, play_manager, mcts, game_state_lib],
+  link_with: [uttt_gs, play_manager, mcts, game_state_lib],
   dependencies : [pybind11_dep, py3_dep, eigen_dep, absl_container_dep, absl_hash_dep, tracy_dep],
   cpp_args: lib_args,
   install: true,

@@ -15,6 +15,11 @@ dependencies = [
     "aim>=3.0",
     "matplotlib>=3.7",
     "simple-term-menu>=1.6",
+    "setuptools>=69,<81",
+    "optuna>=4.9.0",
+    "onnx>=1.22.0",
+    "onnxruntime-gpu>=1.27.0; sys_platform == 'linux'",
+    "onnxruntime>=1.27.0; sys_platform != 'linux'",
 ]
 
 [dependency-groups]

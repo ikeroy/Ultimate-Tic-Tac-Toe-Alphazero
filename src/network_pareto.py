@@ -5,7 +5,7 @@ multiple network architectures on identical batches to compare loss, inference
 speed, and memory usage.
 
 Usage:
-    uv run python src/network_pareto.py data/star_gambit_skirmish/densenet-4d-16c-3k-120sims-board-size
+    uv run python src/network_pareto.py data/uttt/densenet-4d-12c-3k-128sims
     # Then interactively type configs: 4d16c, 6d24c, 4d32c-k5, go
 """
 
@@ -894,7 +894,6 @@ def collect_configs(config, args):
                 if label in seen_labels:
                     print(f"  Skipped duplicate: {label}")
                     continue
-                kwargs['star_gambit_spatial'] = config.star_gambit_spatial
                 kwargs['head_pool'] = config.head_pool
                 cv = kwargs.pop('cv', config.cv)
                 nn_args = NNArgs(lr=args.lr, cv=cv, **kwargs)

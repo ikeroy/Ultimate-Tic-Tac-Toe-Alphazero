@@ -21,7 +21,7 @@ from config import TrainConfig
 
 def test_hash_game_state_deterministic():
     """Same state hashes to same value."""
-    gs = alphazero.Connect4GS()
+    gs = alphazero.UltimateTicTacToeGS()
     h1 = alphazero.hash_game_state(gs)
     h2 = alphazero.hash_game_state(gs)
     assert h1 == h2
@@ -29,8 +29,8 @@ def test_hash_game_state_deterministic():
 
 def test_hash_game_state_different():
     """Different states hash differently."""
-    gs1 = alphazero.Connect4GS()
-    gs2 = alphazero.Connect4GS()
+    gs1 = alphazero.UltimateTicTacToeGS()
+    gs2 = alphazero.UltimateTicTacToeGS()
     gs2.play_move(0)
     h1 = alphazero.hash_game_state(gs1)
     h2 = alphazero.hash_game_state(gs2)
@@ -119,13 +119,13 @@ def test_cache_size_and_max_size():
 
 def test_create_cache_zero_size():
     """create_cache returns None for size <= 0."""
-    assert create_cache(alphazero.Connect4GS, 0) is None
-    assert create_cache(alphazero.Connect4GS, -1) is None
+    assert create_cache(alphazero.UltimateTicTacToeGS, 0) is None
+    assert create_cache(alphazero.UltimateTicTacToeGS, -1) is None
 
 
 def test_create_cache_valid():
     """create_cache returns working cache."""
-    cache = create_cache(alphazero.Connect4GS, 100)
+    cache = create_cache(alphazero.UltimateTicTacToeGS, 100)
     assert cache is not None
     assert cache.max_size() == 100
     assert cache.size() == 0
@@ -148,7 +148,7 @@ def test_cached_inference_miss_and_hit():
             pi = torch.ones(1, self.num_moves) / self.num_moves
             return v, pi
 
-    Game = alphazero.Connect4GS
+    Game = alphazero.UltimateTicTacToeGS
     cache = create_cache(Game, 100)
     agent = FakeAgent(Game)
     gs = Game()
@@ -226,7 +226,7 @@ def _run_mcts_game(Game, agent, cache, num_sims=50, max_moves=20):
 
 def test_mcts_with_and_without_cache_identical():
     """MCTS produces identical policies and values with and without cache."""
-    Game = alphazero.Connect4GS
+    Game = alphazero.UltimateTicTacToeGS
 
     # Run without cache
     agent_no_cache = DeterministicAgent(Game)
@@ -279,13 +279,13 @@ def test_sharded_cache_shared_ptr_holder():
 
 def test_create_sharded_cache_zero():
     """create_sharded_cache returns None for size <= 0."""
-    assert create_sharded_cache(alphazero.Connect4GS, 0) is None
-    assert create_sharded_cache(alphazero.Connect4GS, -1) is None
+    assert create_sharded_cache(alphazero.UltimateTicTacToeGS, 0) is None
+    assert create_sharded_cache(alphazero.UltimateTicTacToeGS, -1) is None
 
 
 def test_create_sharded_cache_valid():
     """create_sharded_cache returns working cache with correct dimensions."""
-    cache = create_sharded_cache(alphazero.Connect4GS, 1000, shards=2)
+    cache = create_sharded_cache(alphazero.UltimateTicTacToeGS, 1000, shards=2)
     assert cache is not None
     assert cache.max_size() == 1000
     assert cache.size() == 0
@@ -293,7 +293,7 @@ def test_create_sharded_cache_valid():
 
 def test_create_sharded_cache_default_shards():
     """create_sharded_cache defaults to 1 shard."""
-    cache = create_sharded_cache(alphazero.Connect4GS, 100)
+    cache = create_sharded_cache(alphazero.UltimateTicTacToeGS, 100)
     assert cache is not None
     assert cache.max_size() == 100
 
@@ -384,8 +384,8 @@ def _run_play_manager_random(Game, params, caches=None, num_games=8):
 
 def test_playmanager_internal_cache_still_works():
     """PlayManager with max_cache_size > 0 (no external caches) still works."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
     params = base_params(config, 0.5, 4, 2)
     params.max_cache_size = 1000
 
@@ -398,8 +398,8 @@ def test_playmanager_internal_cache_still_works():
 
 def test_playmanager_no_cache():
     """PlayManager with no cache (max_cache_size=0, no external caches)."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
     params = base_params(config, 0.5, 4, 2)
     params.max_cache_size = 0
 
@@ -411,8 +411,8 @@ def test_playmanager_no_cache():
 
 def test_playmanager_external_cache():
     """PlayManager with externally-provided ShardedS3FIFOCache works and populates it."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
     params = base_params(config, 0.5, 4, 2)
     params.max_cache_size = 0
 
@@ -429,8 +429,8 @@ def test_playmanager_external_cache():
 
 def test_playmanager_external_cache_shared_across_instances():
     """Two PlayManager instances sharing the same external cache accumulate entries."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
 
     shared_cache = create_sharded_cache(Game, 10000)
 
@@ -456,8 +456,8 @@ def test_playmanager_external_cache_shared_across_instances():
 
 def test_playmanager_external_cache_with_none_entries():
     """PlayManager handles None entries in the caches list (for non-NN groups)."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
 
     # One NN cache, one None (simulating NN vs random where random gets no cache)
     nn_cache = create_sharded_cache(Game, 5000)
@@ -472,8 +472,8 @@ def test_playmanager_external_cache_with_none_entries():
 
 def test_playmanager_cache_max_size_sums_external():
     """cache_max_size() returns sum of external caches' max sizes."""
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
 
     cache1 = create_sharded_cache(Game, 3000)
     cache2 = create_sharded_cache(Game, 5000)
@@ -548,8 +548,8 @@ def test_seat_visits_overrides_visit_count():
     The player with more visits should win significantly more.
     Without seat_visits, both get the same visits and results are even.
     """
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
     nplayers = Game.NUM_PLAYERS()
     num_games = 64
 
@@ -597,8 +597,8 @@ def test_pit_agents_per_seat_overrides():
     """pit_agents with per-seat epsilon/root_temp/fpu_zero produces valid results."""
     from tournament import pit_agents
 
-    Game = alphazero.Connect4GS
-    config = TrainConfig(game="connect4")
+    Game = alphazero.UltimateTicTacToeGS
+    config = TrainConfig(game="uttt")
     nplayers = Game.NUM_PLAYERS()
 
     players = [PlayoutPlayer()] * nplayers

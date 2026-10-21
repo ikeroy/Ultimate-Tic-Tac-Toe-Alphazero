@@ -183,10 +183,9 @@ def test_mcts_analysis_imports():
 
 
 def test_game_registry_used():
-    """All GAME_REGISTRY games are selectable (no hardcoded Star Gambit only)."""
+    """The UTTT registry entry is selectable."""
     available = get_available_games()
-    assert "connect4" in available
-    assert "star_gambit_skirmish" in available
+    assert "uttt" in available
     # Should have all registry games
     for game in GAME_REGISTRY:
         assert game in available
@@ -280,7 +279,7 @@ def test_anchor_selfplay_is_reference(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(10, "selfplay")]
@@ -314,7 +313,7 @@ def test_anchor_base_is_reference(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(10, "selfplay")]
@@ -400,7 +399,7 @@ def test_signal_metrics_present(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]
@@ -460,7 +459,7 @@ def test_signal_vc1_injected_when_absent(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(25, "base")]
@@ -485,7 +484,7 @@ def test_signal_vc1_not_duplicated_when_present(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]
@@ -510,7 +509,7 @@ def test_noise_metrics_present(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]
@@ -704,7 +703,7 @@ def test_snapshots_returned(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base")]
@@ -735,7 +734,7 @@ def test_value_ece_in_metrics(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]
@@ -765,7 +764,7 @@ def test_value_accuracy_gain_in_metrics(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "ANALYSIS_GAMES", 4)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]
@@ -795,7 +794,7 @@ def test_monrad_tournament_fewer_matchups():
     from unittest.mock import patch
     import mcts_analysis
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base"), Entry(50, "base"),
@@ -832,7 +831,7 @@ def test_monrad_tournament_no_self_play_matchup():
     from unittest.mock import patch
     import mcts_analysis
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(50, "base"), Entry(100, "base"), Entry(200, "base")]
@@ -859,7 +858,7 @@ def test_monrad_tournament_no_repeat_matchup():
     from unittest.mock import patch
     import mcts_analysis
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(50, "base"), Entry(100, "base"), Entry(200, "base")]
@@ -885,7 +884,7 @@ def test_monrad_tournament_odd_count():
     from unittest.mock import patch
     import mcts_analysis
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(10, "base"), Entry(50, "base"), Entry(100, "base")]  # 3 entries (odd)
@@ -929,7 +928,7 @@ def test_run_benchmark_basic(monkeypatch):
     import mcts_analysis
     monkeypatch.setattr(mcts_analysis, "BENCHMARK_POSITIONS", 5)
 
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     Game = config.Game
 
     entries = [Entry(1, "base"), Entry(10, "base"), Entry(25, "base")]

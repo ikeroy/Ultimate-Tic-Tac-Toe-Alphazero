@@ -2,19 +2,13 @@
 #include <cstring>
 #include <vector>
 
-#include "brandubh_gs.h"
-#include "connect4_gs.h"
-#include "onitama_gs.h"
-#include "opentafl_gs.h"
-#include "photosynthesis_gs.h"
 #include "play_manager.h"
 #include "s3fifo_cache.h"
-#include "star_gambit_gs.h"
+#include "uttt_gs.h"
 #include "pybind11/eigen.h"
 #include "pybind11/numpy.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
-#include "tawlbwrdd_gs.h"
 #include "tracy_zones.h"
 
 // This file deals with exposing C++ to Python.
@@ -81,28 +75,7 @@ namespace py = pybind11;
         std::string s = b;                                                    \
         return CLS::from_bytes(s);                                            \
       }))
-using brandubh_gs::BrandubhGS;
-using connect4_gs::Connect4GS;
-using onitama_gs::OnitamaGS;
-using opentafl_gs::OpenTaflGS;
-using photosynthesis_gs::PhotosynthesisGS;
-using star_gambit_gs::StarGambitSkirmishGS;
-using star_gambit_gs::StarGambitShowdownGS;
-using star_gambit_gs::StarGambitClashGS;
-using star_gambit_gs::StarGambitBattleGS;
-using star_gambit_gs::StarGambitUnifiedGS;
-using star_gambit_gs::StarGambitUnifiedSkirmishGS;
-using star_gambit_gs::StarGambitUnifiedShowdownGS;
-using star_gambit_gs::StarGambitUnifiedClashGS;
-using star_gambit_gs::StarGambitUnifiedBattleGS;
-using star_gambit_gs::SkirmishConfig;
-using star_gambit_gs::ShowdownConfig;
-using star_gambit_gs::ClashConfig;
-using star_gambit_gs::BattleConfig;
-using star_gambit_gs::ActionSpace;
-using star_gambit_gs::UnitInfo;
-using star_gambit_gs::FireInfo;
-using tawlbwrdd_gs::TawlbwrddGS;
+using uttt_gs::UltimateTicTacToeGS;
 
 // NOLINTNEXTLINE
 PYBIND11_MODULE(alphazero, m) {
@@ -187,6 +160,14 @@ PYBIND11_MODULE(alphazero, m) {
                 out_tensor.dimensions(), out_tensor.data());
           },
           py::call_guard<py::gil_scoped_release>());
+
+  py::class_<UltimateTicTacToeGS, GameState>(m, "UltimateTicTacToeGS")
+      .def(py::init<>())
+      .def_static("NUM_PLAYERS", [] { return uttt_gs::NUM_PLAYERS; })
+      .def_static("NUM_MOVES", [] { return uttt_gs::NUM_MOVES; })
+      .def_static("NUM_SYMMETRIES", [] { return uttt_gs::NUM_SYMMETRIES; })
+      .def_static("CANONICAL_SHAPE", [] { return uttt_gs::CANONICAL_SHAPE; })
+      ADD_GS_PICKLE(UltimateTicTacToeGS);
 
   py::class_<MCTS>(m, "MCTS")
       .def(py::init<float, uint32_t, uint32_t>())
@@ -290,6 +271,10 @@ PYBIND11_MODULE(alphazero, m) {
       .value("RANDOM", EvalType::RANDOM)
       .value("PLAYOUT", EvalType::PLAYOUT);
 
+  py::enum_<HistoryValueTarget>(m, "HistoryValueTarget")
+      .value("FINAL", HistoryValueTarget::FINAL)
+      .value("ROOT", HistoryValueTarget::ROOT);
+
   py::class_<PlayParams>(m, "PlayParams")
       .def(py::init<>())
       .def_readwrite("games_to_play", &PlayParams::games_to_play)
@@ -309,6 +294,7 @@ PYBIND11_MODULE(alphazero, m) {
       .def_readwrite("temp_decay_half_life_by_variant",
                      &PlayParams::temp_decay_half_life_by_variant)
       .def_readwrite("history_enabled", &PlayParams::history_enabled)
+      .def_readwrite("history_value_target", &PlayParams::history_value_target)
       .def_readwrite("tree_reuse", &PlayParams::tree_reuse)
       .def_readwrite("self_play", &PlayParams::self_play)
       .def_readwrite("epsilon", &PlayParams::epsilon)
@@ -491,213 +477,6 @@ PYBIND11_MODULE(alphazero, m) {
             return out;
           },
           py::call_guard<py::gil_scoped_release>());
-
-  py::class_<onitama_gs::Card>(m, "OnitamaCard")
-      .def_readonly("name", &onitama_gs::Card::name)
-      .def_readonly("movements", &onitama_gs::Card::movements)
-      .def_readonly("starting_player", &onitama_gs::Card::starting_player);
-
-  py::class_<OnitamaGS, GameState>(m, "OnitamaGS")
-      .def(py::init<>())
-      .def(py::init<uint8_t>())
-      .def(py::init<uint8_t, uint16_t>())
-      .def("p0_card0", &onitama_gs::OnitamaGS::p0_card0)
-      .def("p0_card1", &onitama_gs::OnitamaGS::p0_card1)
-      .def("p1_card0", &onitama_gs::OnitamaGS::p1_card0)
-      .def("p1_card1", &onitama_gs::OnitamaGS::p1_card1)
-      .def("waiting_card", &onitama_gs::OnitamaGS::waiting_card)
-      .def_static("NUM_PLAYERS", [] { return onitama_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return onitama_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return onitama_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return onitama_gs::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(OnitamaGS);
-
-  py::class_<BrandubhGS, GameState>(m, "BrandubhGS")
-      .def(py::init<>())
-      .def(py::init<uint16_t>())
-      .def_static("NUM_PLAYERS", [] { return brandubh_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return brandubh_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return brandubh_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return brandubh_gs::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(BrandubhGS);
-
-  py::class_<OpenTaflGS, GameState>(m, "OpenTaflGS")
-      .def(py::init<>())
-      .def(py::init<uint16_t>())
-      .def_static("NUM_PLAYERS", [] { return opentafl_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return opentafl_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return opentafl_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return opentafl_gs::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(OpenTaflGS);
-
-  py::class_<TawlbwrddGS, GameState>(m, "TawlbwrddGS")
-      .def(py::init<>())
-      .def(py::init<uint16_t>())
-      .def_static("NUM_PLAYERS", [] { return tawlbwrdd_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return tawlbwrdd_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return tawlbwrdd_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return tawlbwrdd_gs::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(TawlbwrddGS);
-
-  py::class_<Connect4GS, GameState>(m, "Connect4GS")
-      .def(py::init<>())
-      .def(py::init(
-          [](const py::array_t<int8_t>& board, int8_t player, int32_t turn) {
-            if (board.ndim() != connect4_gs::BOARD_SHAPE.size() ||
-                board.shape(0) != connect4_gs::BOARD_SHAPE[0] ||
-                board.shape(1) != connect4_gs::BOARD_SHAPE[1] ||
-                board.shape(2) != connect4_gs::BOARD_SHAPE[2]) {
-              throw std::runtime_error{"Improper connect 4 board shape"};
-            }
-            auto np_unchecked = board.unchecked<3>();
-            auto tensor_board = connect4_gs::BoardTensor{};
-            for (auto i = 0; i < connect4_gs::BOARD_SHAPE[0]; ++i) {
-              for (auto j = 0; j < connect4_gs::BOARD_SHAPE[1]; ++j) {
-                for (auto k = 0; k < connect4_gs::BOARD_SHAPE[2]; ++k) {
-                  tensor_board(i, j, k) = np_unchecked(i, j, k);
-                }
-              }
-            }
-            return Connect4GS(tensor_board, player, turn);
-          }))
-      .def_static("NUM_PLAYERS", [] { return connect4_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return connect4_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return connect4_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return connect4_gs::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(Connect4GS);
-
-  // Star Gambit support structs
-  py::class_<UnitInfo>(m, "UnitInfo")
-      .def_readonly("player", &UnitInfo::player)
-      .def_readonly("type", &UnitInfo::type)
-      .def_readonly("slot", &UnitInfo::slot)
-      .def_readonly("hp", &UnitInfo::hp)
-      .def_readonly("anchor_q", &UnitInfo::anchor_q)
-      .def_readonly("anchor_r", &UnitInfo::anchor_r)
-      .def_readonly("facing", &UnitInfo::facing)
-      .def_readonly("moves_left", &UnitInfo::moves_left);
-
-  py::class_<FireInfo>(m, "FireInfo")
-      .def_readonly("has_target", &FireInfo::has_target)
-      .def_readonly("target_player", &FireInfo::target_player)
-      .def_readonly("target_type", &FireInfo::target_type)
-      .def_readonly("target_slot", &FireInfo::target_slot)
-      .def_readonly("damage", &FireInfo::damage);
-
-  // Star Gambit - Skirmish (3F, 1C, 0D, 5-side board)
-  py::class_<StarGambitSkirmishGS, GameState>(m, "StarGambitSkirmishGS")
-      .def(py::init<>())
-      .def("get_units", &StarGambitSkirmishGS::get_units)
-      .def("get_fire_info", &StarGambitSkirmishGS::get_fire_info)
-      .def_static("NUM_PLAYERS", [] { return star_gambit_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return ActionSpace<SkirmishConfig>::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return star_gambit_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return ActionSpace<SkirmishConfig>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(StarGambitSkirmishGS);
-
-  // Star Gambit - Showdown (4F, 0C, 1D, 5-side board)
-  py::class_<StarGambitShowdownGS, GameState>(m, "StarGambitShowdownGS")
-      .def(py::init<>())
-      .def("get_units", &StarGambitShowdownGS::get_units)
-      .def("get_fire_info", &StarGambitShowdownGS::get_fire_info)
-      .def_static("NUM_PLAYERS", [] { return star_gambit_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return ActionSpace<ShowdownConfig>::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return star_gambit_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return ActionSpace<ShowdownConfig>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(StarGambitShowdownGS);
-
-  // Star Gambit - Clash (3F, 2C, 1D, 5-side board)
-  py::class_<StarGambitClashGS, GameState>(m, "StarGambitClashGS")
-      .def(py::init<>())
-      .def("get_units", &StarGambitClashGS::get_units)
-      .def("get_fire_info", &StarGambitClashGS::get_fire_info)
-      .def_static("NUM_PLAYERS", [] { return star_gambit_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return ActionSpace<ClashConfig>::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return star_gambit_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return ActionSpace<ClashConfig>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(StarGambitClashGS);
-
-  // Star Gambit - Battle (4F, 3C, 2D, 6-side board)
-  py::class_<StarGambitBattleGS, GameState>(m, "StarGambitBattleGS")
-      .def(py::init<>())
-      .def("get_units", &StarGambitBattleGS::get_units)
-      .def("get_fire_info", &StarGambitBattleGS::get_fire_info)
-      .def_static("NUM_PLAYERS", [] { return star_gambit_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return ActionSpace<BattleConfig>::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return star_gambit_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return ActionSpace<BattleConfig>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(StarGambitBattleGS);
-
-  // Star Gambit - Unified (all 4 variants, 13×13 canvas, 36 channels)
-  // probs: variant selection weights [Skirmish, Showdown, Clash, Battle]
-  py::class_<StarGambitUnifiedGS, GameState>(m, "StarGambitUnifiedGS")
-      .def(py::init<int, std::array<float, 4>>(),
-           py::arg("pinned_variant") = -1,
-           py::arg("probs") = std::array<float, 4>{0.25f, 0.25f, 0.25f, 0.25f})
-      .def("get_units", &StarGambitUnifiedGS::get_units)
-      .def("get_fire_info", &StarGambitUnifiedGS::get_fire_info)
-      .def_static("NUM_PLAYERS", [] { return star_gambit_gs::NUM_PLAYERS; })
-      .def_static("NUM_MOVES", [] { return StarGambitUnifiedGS::UNIFIED_NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES", [] { return star_gambit_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return StarGambitUnifiedGS::CANONICAL_SHAPE_ARRAY; })
-      ADD_GS_PICKLE(StarGambitUnifiedGS);
-
-  // Pinned-variant subclasses (always play the specified variant)
-  py::class_<StarGambitUnifiedSkirmishGS, StarGambitUnifiedGS>(
-      m, "StarGambitUnifiedSkirmishGS")
-      .def(py::init<>());
-
-  py::class_<StarGambitUnifiedShowdownGS, StarGambitUnifiedGS>(
-      m, "StarGambitUnifiedShowdownGS")
-      .def(py::init<>());
-
-  py::class_<StarGambitUnifiedClashGS, StarGambitUnifiedGS>(
-      m, "StarGambitUnifiedClashGS")
-      .def(py::init<>());
-
-  py::class_<StarGambitUnifiedBattleGS, StarGambitUnifiedGS>(
-      m, "StarGambitUnifiedBattleGS")
-      .def(py::init<>());
-
-  py::class_<PhotosynthesisGS<2>, GameState>(m, "PhotosynthesisGS2")
-      .def(py::init<>())
-      .def_static("NUM_PLAYERS", [] { return 2; })
-      .def_static("NUM_MOVES", [] { return photosynthesis_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES",
-                  [] { return photosynthesis_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return PhotosynthesisGS<2>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(PhotosynthesisGS<2>);
-
-  py::class_<PhotosynthesisGS<3>, GameState>(m, "PhotosynthesisGS3")
-      .def(py::init<>())
-      .def_static("NUM_PLAYERS", [] { return 3; })
-      .def_static("NUM_MOVES", [] { return photosynthesis_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES",
-                  [] { return photosynthesis_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return PhotosynthesisGS<3>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(PhotosynthesisGS<3>);
-
-  py::class_<PhotosynthesisGS<4>, GameState>(m, "PhotosynthesisGS4")
-      .def(py::init<>())
-      .def_static("NUM_PLAYERS", [] { return 4; })
-      .def_static("NUM_MOVES", [] { return photosynthesis_gs::NUM_MOVES; })
-      .def_static("NUM_SYMMETRIES",
-                  [] { return photosynthesis_gs::NUM_SYMMETRIES; })
-      .def_static("CANONICAL_SHAPE",
-                  [] { return PhotosynthesisGS<4>::CANONICAL_SHAPE; })
-      ADD_GS_PICKLE(PhotosynthesisGS<4>);
 
   m.def("playout_eval", [](const GameState& gs) {
     Vector<float> v;

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a C++/Python AlphaZero implementation. The core game logic and MCTS are in C++ for performance, exposed to Python via pybind11. Python handles neural network training with PyTorch.
+This is a C++/Python AlphaZero implementation for Ultimate Tic-Tac-Toe (UTTT). The core game logic and MCTS are in C++ for performance, exposed to Python via pybind11. Python handles neural network training with PyTorch.
 
 ## Environment Setup
 
@@ -42,11 +42,11 @@ uv run ninja -C build/cp311
 - `src/tournament.py` - Tournament runner (monrad & round-robin)
 - `src/play.py` - Unified interactive play agent
 - `src/mcts_analysis.py` - MCTS threshold analysis (game-generic)
-- `src/game_ui.py` / `src/star_gambit_ui.py` - Pluggable game UI framework
+- `src/game_ui.py` - UTTT command-line UI
 
 ### C++ Core
 - `src/game_state.h` - Game interface (implement this to add new games)
-- `src/*_gs.cc` - Game implementations (connect4, onitama, brandubh, etc.)
+- `src/uttt_gs.cc` - Ultimate Tic-Tac-Toe implementation
 - `src/mcts.cc` - Monte Carlo Tree Search
 - `src/play_manager.cc` - Manages concurrent game play and batching
 - `src/py_wrapper.cc` - Python bindings

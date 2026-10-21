@@ -2,7 +2,7 @@
 
 #include <future>
 
-#include "connect4_gs.h"
+#include "uttt_gs.h"
 #include "gtest/gtest.h"
 
 namespace alphazero {
@@ -17,7 +17,7 @@ TEST(PlayManager, Basic) {
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
   params.history_enabled = true;
   params.playout_cap_randomization = true;
-  auto pm = PlayManager{std::make_unique<connect4_gs::Connect4GS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play = std::async(std::launch::async, [&] {
     try {
       pm.play();
@@ -26,6 +26,38 @@ TEST(PlayManager, Basic) {
     }
   });
   play.wait();
+}
+
+TEST(PlayManager, RootValueHistoryTargetStoresSearchValues) {
+  auto params = PlayParams{};
+  params.games_to_play = 8;
+  params.concurrent_games = 2;
+  params.mcts_visits = {12, 12};
+  params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
+  params.history_enabled = true;
+  params.history_value_target = HistoryValueTarget::ROOT;
+  params.playout_cap_randomization = false;
+
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
+  pm.play();
+
+  bool saw_history = false;
+  bool saw_soft_value = false;
+  while (pm.hist_count() > 0) {
+    auto hist = pm.pop_hist();
+    ASSERT_TRUE(hist.has_value());
+    saw_history = true;
+    EXPECT_NEAR(hist->v.sum(), 1.0f, 1e-4f);
+    bool one_hot = true;
+    for (int i = 0; i < hist->v.size(); ++i) {
+      const auto value = hist->v(i);
+      one_hot = one_hot && (value == 0.0f || value == 1.0f);
+    }
+    saw_soft_value = saw_soft_value || !one_hot;
+  }
+
+  EXPECT_TRUE(saw_history);
+  EXPECT_TRUE(saw_soft_value);
 }
 
 TEST(PlayManager, MultiThreaded) {
@@ -38,7 +70,7 @@ TEST(PlayManager, MultiThreaded) {
   params.mcts_visits = {10, 10};
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
 
-  auto pm = PlayManager{std::make_unique<connect4_gs::Connect4GS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play_workers = std::vector<std::future<void>>{workers};
   for (auto& pw : play_workers) {
     pw = std::async(std::launch::async, [&] {
@@ -61,7 +93,7 @@ TEST(PlayManager, StopEarly) {
   params.concurrent_games = 8;
   params.mcts_visits = {10, 10};
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
-  auto pm = PlayManager{std::make_unique<connect4_gs::Connect4GS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play = std::async(std::launch::async, [&] { pm.play(); });
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   pm.stop();
@@ -80,7 +112,7 @@ TEST(PlayManager, SeatEpsilonWrongOuterDimThrows) {
   // Default seat_perms will be 1 perm, but seat_epsilon has 2.
   params.seat_epsilon = {{0.25, 0.0}, {0.0, 0.25}};
   EXPECT_THROW(
-      PlayManager(std::make_unique<connect4_gs::Connect4GS>(), params),
+      PlayManager(std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params),
       std::runtime_error);
 }
 
@@ -93,7 +125,7 @@ TEST(PlayManager, SeatEpsilonWrongInnerDimThrows) {
   // 1 perm (default), but inner dim is 3 instead of 2.
   params.seat_epsilon = {{0.25, 0.0, 0.1}};
   EXPECT_THROW(
-      PlayManager(std::make_unique<connect4_gs::Connect4GS>(), params),
+      PlayManager(std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params),
       std::runtime_error);
 }
 
@@ -106,7 +138,7 @@ TEST(PlayManager, SeatVisitsWrongDimThrows) {
   // Default seat_perms will be 1 perm, but seat_visits has 3.
   params.seat_visits = {{10, 10}, {10, 10}, {10, 10}};
   EXPECT_THROW(
-      PlayManager(std::make_unique<connect4_gs::Connect4GS>(), params),
+      PlayManager(std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params),
       std::runtime_error);
 }
 
@@ -119,7 +151,7 @@ TEST(PlayManager, SeatOverridesDefaultFill) {
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
   params.epsilon = 0.25;
   EXPECT_NO_THROW(
-      PlayManager(std::make_unique<connect4_gs::Connect4GS>(), params));
+      PlayManager(std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params));
 }
 
 TEST(PlayManager, PerSeatOverrides) {
@@ -134,7 +166,7 @@ TEST(PlayManager, PerSeatOverrides) {
   params.seat_root_fpu_zero = {{1, 0}, {0, 1}};
   params.seat_visits = {{10, 10}, {10, 10}};
 
-  auto pm = PlayManager{std::make_unique<connect4_gs::Connect4GS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play = std::async(std::launch::async, [&] {
     try {
       pm.play();
@@ -163,7 +195,7 @@ TEST(PlayManager, InitOrderPerPermMctsSettings) {
   params.seat_root_fpu_zero = {{1, 0}, {0, 1}};
   params.seat_visits = {{10, 10}, {10, 10}};
 
-  auto pm = PlayManager{std::make_unique<connect4_gs::Connect4GS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
 
   for (uint32_t i = 0; i < params.concurrent_games; ++i) {
     const auto& gd = pm.game_data(i);

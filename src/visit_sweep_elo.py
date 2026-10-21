@@ -23,7 +23,6 @@ import os
 import re
 import sys
 import time
-from collections import defaultdict
 
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SRC_DIR not in sys.path:
@@ -50,12 +49,8 @@ from tournament import pit_agents
 CONFIGS_DIR = os.path.join(os.path.dirname(_SRC_DIR), "configs")
 RAW_POLICY_VISITS = 2  # mcts_visits=2 with default PUCT == argmax of net prior
 
-# Variant id -> human-readable name (matches UNIFIED_VARIANT_NAMES in game_runner).
-UNIFIED_VARIANT_NAMES = ["skirmish", "showdown", "clash", "battle"]
-
-
 def _is_unified(config) -> bool:
-    return getattr(config, "game", None) == "star_gambit_unified"
+    return False
 
 
 def _load_experiment_config(game_name: str, experiment_dir: str) -> TrainConfig:
@@ -290,14 +285,8 @@ def _run_sweep_one_iter(config, Game, paths, experiment_name,
                         anchor_visits: int, cache_size: int):
     """Run the sweep for one test iter against the anchor.
 
-    Single PM run per visit budget. For star_gambit_unified, games are split
-    evenly across the 4 variants in one PM (default equal probs); per-variant
-    win rates are extracted from PM's variant_perm_scores tracking. Aggregate
-    win rate is the total across all variants for that budget.
-
-    Returns list of (variant_name_or_None, k, win_rate, elo_delta) rows.
-    The variant_name is None for the aggregate trace; a string per variant
-    for the unified breakdown.
+    Runs one PlayManager evaluation per visit budget and returns
+    (None, visits, win_rate, elo_delta) rows for UTTT.
     """
     test_nn = neural_net.NNWrapper.load_checkpoint(
         Game, paths["checkpoint"], f"{test_iter:04d}-{experiment_name}.pt",
@@ -318,38 +307,22 @@ def _run_sweep_one_iter(config, Game, paths, experiment_name,
     anchor_cache = create_sharded_cache(Game, cache_size) if cache_size > 0 else None
     caches = [test_cache, anchor_cache] if cache_size > 0 else None
 
-    is_unified = _is_unified(config)
     rows = []
     for k in visits_list:
         effective_k = RAW_POLICY_VISITS if k == 0 else k
         visits = [anchor_visits] * num_players
         visits[0] = effective_k
-        result = pit_agents(
+        win_rates = pit_agents(
             config, Game, players, visits, bs,
             name=f"sweep iter={test_iter} k={k}",
             caches=caches,
-            return_per_variant=is_unified,
         )
-        if is_unified:
-            win_rates, per_variant = result
-        else:
-            win_rates, per_variant = result, {}
 
-        # Aggregate trace (no variant key). For non-unified games this is the
-        # only line; for unified, it averages all 4 variants' games.
+        # UTTT has a single aggregate trace.
         test_wr = win_rates[0]
         elo = _elo_delta(test_wr)
         rows.append((None, k, test_wr, elo))
         tqdm.tqdm.write(f"    k={k:>5d}: test_win_rate={test_wr:.3f}  elo_delta={elo:+.1f}")
-
-        # Per-variant traces.
-        for vid in sorted(per_variant.keys()):
-            vname = (UNIFIED_VARIANT_NAMES[vid]
-                     if 0 <= vid < len(UNIFIED_VARIANT_NAMES) else f"v{vid}")
-            v_wr = per_variant[vid][0]
-            v_elo = _elo_delta(v_wr)
-            rows.append((vname, k, v_wr, v_elo))
-            tqdm.tqdm.write(f"      {vname:>10s}: test_win_rate={v_wr:.3f}  elo_delta={v_elo:+.1f}")
 
     del test_nn, anchor_nn, test_cache, anchor_cache, caches
     import gc

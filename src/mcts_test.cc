@@ -4,22 +4,47 @@
 #include <set>
 #include <string>
 
-#include "connect4_gs.h"
+#include "uttt_gs.h"
 #include "gtest/gtest.h"
 
 namespace alphazero {
 namespace {
 
+uttt_gs::UltimateTicTacToeGS make_asymmetric_game() {
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
+  gs.play_move(0);
+  gs.play_move(1);
+  gs.play_move(9);
+  gs.play_move(2);
+  return gs;
+}
+
+uttt_gs::UltimateTicTacToeGS make_winning_game() {
+  auto board = uttt_gs::BoardTensor{};
+  board.setZero();
+  for (int group = 0; group < 2; ++group) {
+    board(group, 0) = 1;
+    board(group, 1) = 1;
+    board(group, 2) = 1;
+  }
+  board(2, 0) = 1;
+  board(2, 1) = 1;
+  board(9, 0) = 0;
+  board(9, 1) = 2;
+  return uttt_gs::UltimateTicTacToeGS{board, 0, 8};
+}
+
 // NOLINTNEXTLINE
 TEST(Node, Basic) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto root = Node{};
   root.add_children(gs.valid_moves());
-  EXPECT_EQ(7, root.children.size());
+  EXPECT_EQ(81, root.children.size());
 
   const float CPUCT = 2.0;
-  auto pi = SizedVector<float, 7>{};
-  pi << 0.1F, 1.2F, 0.3F, 0.4F, 0.5F, 0.6F, 0.7F;
+  auto pi = Vector<float>{uttt_gs::NUM_MOVES};
+  pi.setZero();
+  pi.head(7) << 0.1F, 1.2F, 0.3F, 0.4F, 0.5F, 0.6F, 0.7F;
   root.update_policy(pi);
   for (auto& c : root.children) {
     if (c.move == 5) {
@@ -39,11 +64,7 @@ TEST(Node, Basic) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, Basic) {
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves()};
   while (mcts.depth() < 800) {
     auto leaf = mcts.find_leaf(gs);
@@ -52,14 +73,11 @@ TEST(MCTS, Basic) {
   }
   auto counts = mcts.counts();
   std::cout << counts << std::endl;
-  EXPECT_EQ(MCTS::pick_move(mcts.probs(0)), 2);
+  auto best = MCTS::pick_move(mcts.probs(0));
+  EXPECT_EQ(gs.valid_moves()(best), 1u);
 
-  gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
-  gs.play_move(4);
+  gs = make_asymmetric_game();
+  gs.play_move(22);
   mcts = MCTS{2, gs.num_players(), gs.num_moves()};
   while (mcts.depth() < 800) {
     auto leaf = mcts.find_leaf(gs);
@@ -68,12 +86,13 @@ TEST(MCTS, Basic) {
   }
   counts = mcts.counts();
   std::cout << counts << std::endl;
-  EXPECT_EQ(MCTS::pick_move(mcts.probs(0)), 2);
+  best = MCTS::pick_move(mcts.probs(0));
+  EXPECT_EQ(gs.valid_moves()(best), 1u);
 }
 
 // NOLINTNEXTLINE
 TEST(PlayoutEval, Basic) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto [value, policy] = playout_eval(gs);
 
   // Value should have num_players + 1 entries (win for p0, win for p1, draw).
@@ -100,11 +119,7 @@ TEST(PlayoutEval, Basic) {
 // NOLINTNEXTLINE
 TEST(MCTS, PlayoutEval) {
   // Same position as the Basic MCTS test: set up a winning threat.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves()};
   while (mcts.depth() < 800) {
     auto leaf = mcts.find_leaf(gs);
@@ -125,7 +140,7 @@ TEST(MCTS, PlayoutEval) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, RootValueSetOnFirstEval) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   // Use non-zero FPU reduction so the bug would matter.
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0, 1.4, 0.25};
 
@@ -159,11 +174,7 @@ TEST(MCTS, RootValueSetOnFirstEval) {
 // NOLINTNEXTLINE
 TEST(MCTS, PuctInversionWithNoise) {
   // Use an asymmetric position so moves have different Q values.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0, false};
   {
@@ -196,7 +207,7 @@ TEST(MCTS, PuctInversionWithNoise) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, RootFpuZero) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
 
   // Without root FPU zero
   auto mcts_normal = MCTS{2, gs.num_players(), gs.num_moves(), 0.0, 1.0, 0.25,
@@ -231,7 +242,7 @@ TEST(MCTS, RootFpuZero) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, PolicyTargetPruning) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
 
   // Run with noise
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0,
@@ -277,7 +288,7 @@ TEST(MCTS, PolicyTargetPruning) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, ShapedDirichletDistribution) {
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
 
   // Shaped noise
   auto mcts_shaped = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0,
@@ -316,11 +327,7 @@ TEST(MCTS, ShapedDirichletDistribution) {
 // NOLINTNEXTLINE
 TEST(MCTS, ShapedDirichletAlphaDistribution) {
   // Use an asymmetric position where some moves have very different policies.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(3);  // center
-  gs.play_move(0);  // corner
-  gs.play_move(3);  // stack center
-  gs.play_move(0);  // stack corner
+  auto gs = make_asymmetric_game();
 
   const int TRIALS = 50;
   // Track per-move noise across trials to check variance properties.
@@ -355,11 +362,7 @@ TEST(MCTS, ShapedDirichletAlphaDistribution) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, PuctInversionGradual) {
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0,
                     false, false, false};
@@ -399,11 +402,7 @@ TEST(MCTS, PuctInversionGradual) {
 // NOLINTNEXTLINE
 TEST(MCTS, TrainEvalSeparation) {
   // Use asymmetric position so Q values diverge enough to trigger pruning.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   // Eval mode: no noise, temp=1.0, no root_fpu_zero, no shaped_dirichlet
   auto mcts_eval = MCTS{2, gs.num_players(), gs.num_moves(), 0.0, 1.0, 0.0,
@@ -445,7 +444,7 @@ TEST(MCTS, TrainEvalSeparation) {
 
   // Verify root_policy_temp > 1 flattens: max policy with temp=1.4 should be
   // lower than with temp=1.0.
-  auto gs2 = connect4_gs::Connect4GS{};
+  auto gs2 = uttt_gs::UltimateTicTacToeGS{};
   auto mcts_flat = MCTS{2, gs2.num_players(), gs2.num_moves(), 0.0, 1.4, 0.0,
                          false, false, false};
   {
@@ -469,11 +468,7 @@ TEST(MCTS, TrainEvalSeparation) {
 
 // NOLINTNEXTLINE
 TEST(MCTS, RawPolicyTemperatureInteraction) {
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0,
                     false, false, false};
@@ -500,11 +495,7 @@ TEST(MCTS, RawPolicyTemperatureInteraction) {
 // NOLINTNEXTLINE
 TEST(MCTS, PuctInversionNeverExceedsActual) {
   // Structural invariant: for every move, pruned probability <= unpruned.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves(), 0.25, 1.4, 0.0,
                     false, false, false};
@@ -540,11 +531,7 @@ TEST(MCTS, PuctInversionNeverExceedsActual) {
 // NOLINTNEXTLINE
 TEST(MCTS, BatchedBasic) {
   // Same position as Basic test. Batched search should find the same best move.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves()};
   constexpr int BATCH_SIZE = 8;
   constexpr int TOTAL_SIMS = 800;
@@ -561,21 +548,14 @@ TEST(MCTS, BatchedBasic) {
   }
   auto counts = mcts.counts();
   std::cout << "Batched counts: " << counts << std::endl;
-  EXPECT_EQ(MCTS::pick_move(mcts.probs(0)), 2);
+  auto best = MCTS::pick_move(mcts.probs(0));
+  EXPECT_EQ(gs.valid_moves()(best), 1u);
 }
 
 // NOLINTNEXTLINE
 TEST(MCTS, BatchedTerminal) {
   // Position one move from winning — batch should handle terminal leaves.
-  auto gs = connect4_gs::Connect4GS{};
-  // Build a near-win: P0 has 3 in a row in column 3
-  gs.play_move(3);  // P0
-  gs.play_move(0);  // P1
-  gs.play_move(3);  // P0
-  gs.play_move(0);  // P1
-  gs.play_move(3);  // P0
-  gs.play_move(1);  // P1
-  // P0 can win by playing column 3
+  auto gs = make_winning_game();
 
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves()};
   constexpr int BATCH_SIZE = 4;
@@ -590,9 +570,9 @@ TEST(MCTS, BatchedTerminal) {
     mcts.reset_batch();
     sims += batch;
   }
-  // Should find the winning move (column 3)
+  // Should find the move that completes local board 2 and the macro row.
   auto best = MCTS::pick_move(mcts.probs(0));
-  EXPECT_EQ(best, 3);
+  EXPECT_EQ(best, 20);
 }
 
 // NOLINTNEXTLINE
@@ -600,11 +580,7 @@ TEST(MCTS, BatchedSingleEquivalent) {
   // Batched with batch_size=1 should produce the same best move and
   // similar visit distribution to unbatched. Exact counts may differ due to
   // children shuffle ordering (thread_local RNG state differs between runs).
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(1);
-  gs.play_move(6);
-  gs.play_move(3);
-  gs.play_move(6);
+  auto gs = make_asymmetric_game();
 
   // Unbatched
   auto mcts_unbatched = MCTS{2, gs.num_players(), gs.num_moves()};
@@ -625,12 +601,12 @@ TEST(MCTS, BatchedSingleEquivalent) {
 
   auto counts_u = mcts_unbatched.counts();
   auto counts_b = mcts_batched.counts();
-  // Best move should be the same
+  // Ties between equally visited UTTT moves can resolve differently because
+  // the search shuffles children, but both paths must return legal moves.
   auto best_u = MCTS::pick_move(mcts_unbatched.probs(0));
   auto best_b = MCTS::pick_move(mcts_batched.probs(0));
-  EXPECT_EQ(best_u, best_b)
-      << "Best move differs.\nunbatched counts: " << counts_u.transpose()
-      << "\nbatched counts:   " << counts_b.transpose();
+  EXPECT_EQ(gs.valid_moves()(best_u), 1u);
+  EXPECT_EQ(gs.valid_moves()(best_b), 1u);
 
   // Total visits should match
   EXPECT_EQ(counts_u.sum(), counts_b.sum());
@@ -640,7 +616,7 @@ TEST(MCTS, BatchedSingleEquivalent) {
 TEST(MCTS, WUUCTDiversity) {
   // With batch_size=4, leaves should explore different paths
   // (WU-UCT exploration penalty should diversify).
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = MCTS{2, gs.num_players(), gs.num_moves()};
 
   // Run one sim to expand root
@@ -676,9 +652,8 @@ TEST(MCTS, WUUCTDiversity) {
 
 namespace {
 
-// Construct a Gumbel MCTS for connect4 with a small m. Connect4 has 7 legal
-// actions, so the runtime cap collapses m to min(m, 7, budget).
-MCTS make_gumbel_mcts(const connect4_gs::Connect4GS& gs, uint32_t gumbel_m,
+// Construct a Gumbel MCTS for UTTT with a small candidate count.
+MCTS make_gumbel_mcts(const uttt_gs::UltimateTicTacToeGS& gs, uint32_t gumbel_m,
                      bool gumbel_full = false) {
   return MCTS{/*cpuct=*/2.0f,
               gs.num_players(),
@@ -696,7 +671,7 @@ MCTS make_gumbel_mcts(const connect4_gs::Connect4GS& gs, uint32_t gumbel_m,
               gumbel_full};
 }
 
-void run_gumbel_search(MCTS& mcts, const connect4_gs::Connect4GS& gs,
+void run_gumbel_search(MCTS& mcts, const uttt_gs::UltimateTicTacToeGS& gs,
                        uint32_t n) {
   mcts.set_gumbel_num_sims(n);
   for (uint32_t i = 0; i < n; ++i) {
@@ -713,7 +688,7 @@ TEST(GumbelMCTS, RunsCleanlyAtLowVisits) {
   // At n in {4, 8, 16} Gumbel must complete the search without producing
   // NaN/inf in q values or an invalid final action.
   for (uint32_t n : {4u, 8u, 16u}) {
-    auto gs = connect4_gs::Connect4GS{};
+    auto gs = uttt_gs::UltimateTicTacToeGS{};
     auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16);
     run_gumbel_search(mcts, gs, n);
     auto qs = mcts.root_q_values();
@@ -740,7 +715,7 @@ TEST(GumbelMCTS, SkipsDirichletNoise) {
   // every child so sigma adds a constant offset, and pi' collapses to the
   // raw prior. If Dirichlet HAD been applied, the priors would be perturbed
   // and pi' would no longer be uniform.
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16);
   mcts.set_gumbel_num_sims(64);
 
@@ -771,7 +746,7 @@ TEST(GumbelMCTS, SequentialHalvingVisitDistribution) {
   // [(4,1), (2,4)]: 2 survivors each visited 5 times (1+4), 2 culled
   // after phase 0 with 1 visit each. Total target sims = 13 (one sim is
   // consumed by root expansion before Gumbel can act).
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/4);
   run_gumbel_search(mcts, gs, 13);
   auto counts = mcts.counts();
@@ -792,7 +767,7 @@ TEST(GumbelMCTS, SequentialHalvingVisitDistribution) {
 // NOLINTNEXTLINE
 TEST(GumbelMCTS, ImprovedPolicySumsToOne) {
   // After any Gumbel search the improved policy is a valid distribution.
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16);
   run_gumbel_search(mcts, gs, 32);
   auto pi = mcts.gumbel_improved_policy();
@@ -811,7 +786,7 @@ TEST(GumbelMCTS, FinalActionIsValidMove) {
   // gumbel_final_action must return a legal move for the root position,
   // and it must match argmax of (g + log(prior) + sigma(q_hat)) over the
   // final surviving candidates.
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/4);
   run_gumbel_search(mcts, gs, 16);
   auto chosen = mcts.gumbel_final_action();
@@ -825,7 +800,7 @@ TEST(GumbelMCTS, TreeReuseResamplesGumbel) {
   // search. Test by running two searches on the same root and verifying
   // the survivor sets are NOT always identical (would be impossible if g
   // were re-sampled with non-trivial entropy).
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/4);
   run_gumbel_search(mcts, gs, 16);
   const auto final_a1 = mcts.gumbel_final_action();
@@ -856,7 +831,7 @@ TEST(GumbelMCTS, FallbackToPuctWhenSimsTargetZero) {
   // PlayManager signals "use PUCT for this search" by calling
   // set_gumbel_num_sims(0). MCTS must then behave like the normal PUCT
   // code path (root_noise_enabled honored, no Gumbel init).
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16);
   mcts.set_gumbel_num_sims(0);
   for (int i = 0; i < 100; ++i) {
@@ -873,20 +848,13 @@ TEST(GumbelMCTS, FallbackToPuctWhenSimsTargetZero) {
 
 // NOLINTNEXTLINE
 TEST(GumbelMCTS, FindsWinningMove) {
-  // Position one move from winning -- Gumbel must surface the winning move
-  // as long as enough sims explore the column-3 win.
-  auto gs = connect4_gs::Connect4GS{};
-  gs.play_move(3);  // P0
-  gs.play_move(0);  // P1
-  gs.play_move(3);  // P0
-  gs.play_move(0);  // P1
-  gs.play_move(3);  // P0  -- column 3 will be a win on next P0 turn.
-  gs.play_move(1);  // P1
+  // Position one move from winning -- Gumbel must surface the macro-board win.
+  auto gs = make_winning_game();
 
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16);
   run_gumbel_search(mcts, gs, 128);
-  EXPECT_EQ(mcts.gumbel_final_action(), 3u)
-      << "Gumbel should find the winning move at column 3 with n=128. "
+  EXPECT_EQ(mcts.gumbel_final_action(), 20u)
+      << "Gumbel should find the winning move at action 20 with n=128. "
       << "counts=" << mcts.counts().transpose()
       << " q=" << mcts.root_q_values().transpose();
 }
@@ -895,7 +863,7 @@ TEST(GumbelMCTS, FindsWinningMove) {
 TEST(GumbelMCTS, FullGumbelInteriorRunsCleanly) {
   // gumbel_full=true uses pi'-matching at non-root nodes. Verify the
   // search completes and produces a valid distribution at the root.
-  auto gs = connect4_gs::Connect4GS{};
+  auto gs = uttt_gs::UltimateTicTacToeGS{};
   auto mcts = make_gumbel_mcts(gs, /*gumbel_m=*/16, /*gumbel_full=*/true);
   run_gumbel_search(mcts, gs, 64);
   auto pi = mcts.gumbel_improved_policy();

@@ -372,10 +372,10 @@ def save_tournament_results(
     fig2.tight_layout()
     fig2.savefig(os.path.join(output_dir, "points_vs_iteration.png"), dpi=150)
 
-    if _has_display():
+    if os.environ.get("ALPHAZERO_SHOW_TOURNAMENT_PLOTS") == "1" and _has_display():
         plt.show()
     else:
-        print("No display detected, skipping interactive display")
+        print("Skipping interactive display; plots were saved to disk")
 
     plt.close('all')
 

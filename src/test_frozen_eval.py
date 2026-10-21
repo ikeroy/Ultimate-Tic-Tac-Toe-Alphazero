@@ -59,39 +59,14 @@ def test_snapshot_exists_false_when_file_is_empty(tmp_path):
 # ---------------------------------------------------------------------------
 
 class _FakeConfig:
-    def __init__(self, game, fractions=None):
+    def __init__(self, game):
         self.game = game
-        self.variant_fractions = fractions or {}
 
 
 def test_variant_targets_non_unified():
-    cfg = _FakeConfig("connect4")
+    cfg = _FakeConfig("uttt")
     targets = frozen_eval._variant_targets(cfg, 1024)
     assert targets == {None: 1024}
-
-
-def test_variant_targets_unified_proportional():
-    cfg = _FakeConfig(
-        "star_gambit_unified",
-        {"skirmish": 0.4, "showdown": 0.3, "clash": 0.2, "battle": 0.1},
-    )
-    targets = frozen_eval._variant_targets(cfg, 1000)
-    # Ordering by name -> variant id: skirmish=0, showdown=1, clash=2, battle=3
-    assert sum(targets.values()) == 1000
-    # Largest fraction should get most positions
-    assert targets[0] >= targets[1] >= targets[2] >= targets[3]
-    # Roughly proportional (small rounding tolerance)
-    assert abs(targets[0] - 400) <= 1
-    assert abs(targets[3] - 100) <= 1
-
-
-def test_variant_targets_rounds_correctly():
-    cfg = _FakeConfig(
-        "star_gambit_unified",
-        {"skirmish": 1.0/3, "showdown": 1.0/3, "clash": 1.0/3},
-    )
-    targets = frozen_eval._variant_targets(cfg, 100)
-    assert sum(targets.values()) == 100
 
 
 # ---------------------------------------------------------------------------

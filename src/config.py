@@ -14,52 +14,59 @@ import alphazero
 
 
 GAME_REGISTRY = {
-    "connect4": "Connect4GS",
-    "onitama": "OnitamaGS",
-    "brandubh": "BrandubhGS",
-    "open_tafl": "OpenTaflGS",
-    "tawlbwrdd": "TawlbwrddGS",
-    "photosynthesis_2p": "PhotosynthesisGS2",
-    "photosynthesis_3p": "PhotosynthesisGS3",
-    "photosynthesis_4p": "PhotosynthesisGS4",
-    "star_gambit_skirmish": "StarGambitSkirmishGS",
-    "star_gambit_showdown": "StarGambitShowdownGS",
-    "star_gambit_clash": "StarGambitClashGS",
-    "star_gambit_battle": "StarGambitBattleGS",
-    "star_gambit_unified": "StarGambitUnifiedGS",
-    "star_gambit_unified_skirmish": "StarGambitUnifiedSkirmishGS",
-    "star_gambit_unified_showdown": "StarGambitUnifiedShowdownGS",
-    "star_gambit_unified_clash": "StarGambitUnifiedClashGS",
-    "star_gambit_unified_battle": "StarGambitUnifiedBattleGS",
+    "uttt": "UltimateTicTacToeGS",
 }
 
 
 @dataclass
 class TrainConfig:
     # Game
-    game: str = "connect4"
+    game: str = "uttt"
 
     # Network
     depth: int = 4
     channels: int = 12
     kernel_size: int = 5
     dense_net: bool = True
-    star_gambit_spatial: bool = False
+    uttt_hierarchical: bool = False
     head_channels: int = 32
     head_pool: bool = True
     v_head_convs: int = 0
     pi_head_convs: int = 0
     v_fc_layers: int = 1
     pi_fc_layers: int = 0
+    # UTTT hierarchical policy head:
+    # "flat" = original 81-logit head.
+    # "factorized_simple" = board logits + per-board cell logits.
+    # "factorized_hybrid" = original flat logits + factorized logits.
+    uttt_policy_head: str = "flat"
+    # Add the macro embedding of the board that each cell sends the opponent to
+    # into UTTT hierarchical policy features.
+    uttt_destination_context: bool = False
+    # Separate macro-board/transformer width for UTTT hierarchical networks.
+    # -1 ties macro width to channels, preserving legacy behavior.
+    uttt_macro_channels: int = -1
+    # Optional transformer over the 3x3 macro-board token grid in the UTTT
+    # hierarchical architecture. 0 layers preserves the pure-CNN baseline.
+    uttt_macro_transformer_layers: int = 0
+    uttt_macro_transformer_heads: int = 4
+    uttt_macro_transformer_ff_mult: float = 4.0
+    uttt_macro_transformer_dropout: float = 0.0
     # "batch" (default, current behavior) or "layer" (GroupNorm(1,C) — per-sample
     # LayerNorm across (C,H,W); avoids the batch-statistic propagation that
     # contributes to feature collapse in bootstrapped RL targets).
     trunk_norm: str = "batch"
     # AlphaZero standard. KataGo uses 3e-5 (even lower) and the AlphaZero
-    # paper specifies 1e-4. star_gambit train-fixes empirically validated
-    # the move from 1e-3 -> 1e-4. 1e-3 was the old codebase default and
+    # paper specifies 1e-4. Experiments validated the move from 1e-3 -> 1e-4;
+    # 1e-3 was the old codebase default and
     # produced visibly worse plasticity / effective rank.
     weight_decay: float = 1e-4
+    # Optimizer used for network training. Checkpoints persist this choice so
+    # optimizer state can be reconstructed before loading.
+    optimizer: str = "sgd"
+    adamw_beta1: float = 0.9
+    adamw_beta2: float = 0.999
+    adamw_eps: float = 1e-8
     # "relu" (default) or "crelu" (Concatenated ReLU, preserves negative-direction
     # features and mitigates dying-ReLU plasticity loss; doubles intermediate
     # channel count in blocks).
@@ -98,7 +105,7 @@ class TrainConfig:
     #   "auto"   - same as the main search algo (Gumbel if gumbel_enabled, else PUCT)
     #   "puct"   - force PUCT for capped (even when main is Gumbel)
     #   "gumbel" - force Gumbel for capped (Gumbel-everywhere)
-    # Connect4 retest showed PUCT-for-capped trains a stronger network than
+    # Retesting showed PUCT-for-capped trains a stronger network than
     # Gumbel-for-capped at low capped visit counts (capped Gumbel introduces
     # ~40% top-1 variance in trajectories, polluting training data).
     fast_search_algo: str = "auto"
@@ -119,34 +126,64 @@ class TrainConfig:
     self_play_temp: float = 1.0
     eval_temp: float = 0.5
     final_temp: float = 0.2
-    # int = uniform half-life. dict = per-variant; must list every variant
-    # named in UNIFIED_VARIANT_NAMES (skirmish, showdown, clash, battle).
+    # Temperature-decay half-life in turns; 0 disables decay.
     temp_decay_half_life: object = 10
 
     # Self-play
     self_play_batch_size: int = 1024
     self_play_concurrent_batch_mult: int = 2
     self_play_chunks: int = 1
+    # 0 = derive from self_play_batch_size * NUM_PLAYERS *
+    # self_play_concurrent_batch_mult * self_play_chunks.
+    # Positive values decouple generated games/iter from GPU batch sizing.
+    self_play_games_per_iter: int = 0
+    # AlphaZero-style continuous self-play. When enabled, iteration i uses
+    # checkpoint i even if that checkpoint has not passed the arena gate.
+    selfplay_use_latest: bool = False
 
     # Training
     train_batch_size: int = 1024
+    # If true, each new candidate starts gradient training from the current
+    # gated best checkpoint. Failed candidates are discarded as parents.
+    train_from_best: bool = False
     # KataGo's max-train-bucket-per-new-data. Each fresh sample gets 4
-    # training passes through the network. star_gambit train-fixes
-    # validated this empirically; default was 1 previously.
+    # training passes through the network. This was validated empirically;
+    # the previous default was 1.
     train_sample_rate: int = 4
+    # Optional fixed supervised dataset mixed into every training update.
+    # This is intended for a compact external-teacher anchor: normal self-play
+    # remains the majority of samples, while the anchor prevents policy/value
+    # drift on positions with stronger search targets.
+    teacher_anchor_dir: str = ""
+    teacher_anchor_fraction: float = 0.0
     lr: float = 0.01
     cv: float = 1.5
 
-    # LR schedule: "constant", "step", or "adaptive"
+    # LR schedule: "constant", "step", "adaptive", "cosine", or "exponential"
     lr_schedule: str = "constant"
     lr_steps: list = field(default_factory=list)  # for step mode: [[0, 0.01], [250, 0.003]]
+    lr_cosine_min_factor: float = 0.1
+    lr_cosine_start_iter: int = -1  # -1 = start after warmup
+    lr_cosine_end_iter: int = -1    # -1 = final configured iteration
+    lr_exponential_final_factor: float = 0.1
+    lr_exponential_start_iter: int = -1  # -1 = start after warmup
+    lr_exponential_end_iter: int = -1    # -1 = final configured iteration
     lr_drop_factor: float = 0.3
     lr_patience: int = 8
     lr_min_iter: int = 50
     lr_min_between_drops: int = 30
     lr_max_drops: int = 3
+    # Value target stored in self-play history:
+    #   "final" = final game W/L/D result, current AlphaZero-style behavior
+    #   "root"  = MCTS root-value estimate at the sampled position
+    value_target: str = "final"
+    # Policy target loss name. "cross_entropy" and "kl" have identical
+    # gradients for soft policy targets; "kl" subtracts target entropy when
+    # reported. Kept explicit so experiments can state the intended target.
+    policy_loss: str = "cross_entropy"
 
     # Gating
+    gating_enabled: bool = True
     gating_panel_size: int = 1
     gating_panel_win_rate: float = 0.52
     gating_best_win_rate: float = 0.52
@@ -203,6 +240,11 @@ class TrainConfig:
     # past compare_past_saturation_threshold.
     compare_past: list = field(default_factory=lambda: [-20])
     compare_past_saturation_threshold: float = 0.97
+    # Reporting-only rating metrics. Gating/model promotion still uses direct
+    # win-rate comparisons vs best/panel. Disable these during architecture
+    # probes to avoid extra Aim noise and WHR refit overhead.
+    elo_enabled: bool = True
+    whr_enabled: bool = True
 
     # Reservoir
     reservoir_recency_decay: float = 0.995
@@ -242,18 +284,6 @@ class TrainConfig:
     # Parallel file loading
     loader_threads: int = -1  # -1 = os.cpu_count()
 
-    # Multi-variant Star Gambit (only used when game = star_gambit_unified)
-    # Fraction of games (or samples for sample_based) per variant; must sum to 1.0.
-    # e.g. {"skirmish": 0.25, "showdown": 0.25, "clash": 0.25, "battle": 0.25}
-    variant_fractions: dict = field(default_factory=dict)
-    # "game_based": use fractions directly as game probabilities.
-    # "sample_based": adjust game probs each iteration to hit target sample fractions.
-    variant_mixing_mode: str = "game_based"
-    # Variant weights for gating evaluation (defaults to variant_fractions if empty).
-    gating_variant_weights: dict = field(default_factory=dict)
-    # Interval for dedicated per-variant evaluation (0 = disabled).
-    variant_eval_interval: int = 0
-
     # Frozen eval set (Feature 1, see plan i-want-the-vs-refactored-hippo.md)
     # Empty list = disabled. Multiple anchors give complementary windows
     # (e.g., [5, 30, 100, 300] for early/mid/late training signal).
@@ -272,6 +302,23 @@ class TrainConfig:
     selfmatch_games: int = 100
     selfmatch_interval: int = 1
 
+    # External UTTT.ai raw-policy benchmark.
+    # Disabled by default. When enabled for game=uttt, every N iterations it
+    # plays the freshly trained checkpoint directly from policy logits against
+    # the cached uttt.ai ONNX policy/value net, with no MCTS on either side.
+    uttt_ai_eval_interval: int = 10
+    uttt_ai_eval_games: int = 256
+    uttt_ai_eval_temperature: float = 0.0
+    uttt_ai_eval_opening_plies: int = 6
+    # Fixed opening seed makes checkpoint-to-checkpoint evals comparable.
+    # Set to -1 to use the eval iteration as the seed instead.
+    uttt_ai_eval_opening_seed: int = 0
+    uttt_ai_eval_model: str = ""
+    uttt_ai_eval_require_cuda: bool = False
+    # Track the highest raw-policy UTTT.ai score as the saved champion. This
+    # does not control self-play when selfplay_use_latest is enabled.
+    uttt_ai_select_best: bool = False
+
     # Effective rank (Feature 3) — participation ratio of penultimate-layer
     # activations. Cheap; default ON.
     effective_rank_enabled: bool = True
@@ -280,46 +327,109 @@ class TrainConfig:
     def validate(self):
         if self.game not in GAME_REGISTRY:
             raise ValueError(f"Unknown game: {self.game}")
-        valid_lr_schedules = {"constant", "step", "adaptive"}
+        valid_lr_schedules = {"constant", "step", "adaptive", "cosine", "exponential"}
         if self.lr_schedule not in valid_lr_schedules:
             raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
+        valid_optimizers = {"sgd", "adamw"}
+        if self.optimizer not in valid_optimizers:
+            raise ValueError(f"Unknown optimizer: {self.optimizer}")
+        valid_value_targets = {"final", "root"}
+        if self.value_target not in valid_value_targets:
+            raise ValueError(f"Unknown value_target: {self.value_target}")
+        valid_policy_losses = {"cross_entropy", "kl"}
+        if self.policy_loss not in valid_policy_losses:
+            raise ValueError(f"Unknown policy_loss: {self.policy_loss}")
+        if not 0.0 <= self.adamw_beta1 < 1.0:
+            raise ValueError(f"adamw_beta1 must be in [0, 1), got {self.adamw_beta1}")
+        if not 0.0 <= self.adamw_beta2 < 1.0:
+            raise ValueError(f"adamw_beta2 must be in [0, 1), got {self.adamw_beta2}")
+        if self.adamw_eps <= 0.0:
+            raise ValueError(f"adamw_eps must be positive, got {self.adamw_eps}")
+        if not 0.0 <= self.lr_cosine_min_factor <= 1.0:
+            raise ValueError(
+                f"lr_cosine_min_factor must be between 0 and 1, got {self.lr_cosine_min_factor}"
+            )
+        if not 0.0 < self.lr_exponential_final_factor <= 1.0:
+            raise ValueError(
+                "lr_exponential_final_factor must be in (0, 1], "
+                f"got {self.lr_exponential_final_factor}"
+            )
         if self.gating_panel_size < 1:
             raise ValueError(f"gating_panel_size must be >= 1, got {self.gating_panel_size}")
+        if not 0.0 <= self.teacher_anchor_fraction < 1.0:
+            raise ValueError(
+                "teacher_anchor_fraction must be in [0, 1), got "
+                f"{self.teacher_anchor_fraction}"
+            )
+        if self.teacher_anchor_fraction > 0.0 and not self.teacher_anchor_dir:
+            raise ValueError(
+                "teacher_anchor_dir is required when teacher_anchor_fraction is positive"
+            )
         if self.iterations < 1:
             raise ValueError(f"iterations must be >= 1, got {self.iterations}")
-        valid_mixing_modes = {"game_based", "sample_based"}
-        if self.variant_mixing_mode not in valid_mixing_modes:
-            raise ValueError(f"Unknown variant_mixing_mode: {self.variant_mixing_mode}")
-        valid_variants = {"skirmish", "showdown", "clash", "battle"}
-        if self.variant_fractions:
-            unknown = set(self.variant_fractions) - valid_variants
-            if unknown:
-                raise ValueError(f"Unknown variant names in variant_fractions: {unknown}")
-            if abs(sum(self.variant_fractions.values()) - 1.0) > 1e-4:
-                raise ValueError(f"variant_fractions must sum to 1.0, got {sum(self.variant_fractions.values()):.4f}")
-        if self.gating_variant_weights:
-            unknown = set(self.gating_variant_weights) - valid_variants
-            if unknown:
-                raise ValueError(f"Unknown variant names in gating_variant_weights: {unknown}")
-        if isinstance(self.temp_decay_half_life, dict):
-            unknown = set(self.temp_decay_half_life) - valid_variants
-            if unknown:
-                raise ValueError(f"Unknown variant names in temp_decay_half_life: {unknown}")
-            missing = valid_variants - set(self.temp_decay_half_life)
-            if missing:
-                raise ValueError(
-                    f"temp_decay_half_life dict must list every variant "
-                    f"({sorted(valid_variants)}); missing: {sorted(missing)}"
-                )
-            bad = {k: v for k, v in self.temp_decay_half_life.items()
-                   if not isinstance(v, (int, float)) or v < 0}
-            if bad:
-                raise ValueError(f"temp_decay_half_life values must be non-negative numbers: {bad}")
-        elif not isinstance(self.temp_decay_half_life, (int, float)):
+        if self.uttt_macro_transformer_layers < 0:
             raise ValueError(
-                f"temp_decay_half_life must be a number or a dict keyed by variant, "
+                "uttt_macro_transformer_layers must be >= 0, "
+                f"got {self.uttt_macro_transformer_layers}"
+            )
+        if self.uttt_macro_channels == 0 or self.uttt_macro_channels < -1:
+            raise ValueError(
+                "uttt_macro_channels must be -1 or a positive integer, "
+                f"got {self.uttt_macro_channels}"
+            )
+        if self.uttt_ai_eval_interval < 0:
+            raise ValueError(
+                "uttt_ai_eval_interval must be >= 0, "
+                f"got {self.uttt_ai_eval_interval}"
+            )
+        if self.uttt_ai_eval_games < 1:
+            raise ValueError(
+                "uttt_ai_eval_games must be >= 1, "
+                f"got {self.uttt_ai_eval_games}"
+            )
+        if self.uttt_ai_eval_temperature < 0.0:
+            raise ValueError(
+                "uttt_ai_eval_temperature must be >= 0, "
+                f"got {self.uttt_ai_eval_temperature}"
+            )
+        if self.uttt_ai_eval_opening_plies < 0:
+            raise ValueError(
+                "uttt_ai_eval_opening_plies must be >= 0, "
+                f"got {self.uttt_ai_eval_opening_plies}"
+            )
+        if self.uttt_ai_eval_opening_seed < -1:
+            raise ValueError(
+                "uttt_ai_eval_opening_seed must be >= -1, "
+                f"got {self.uttt_ai_eval_opening_seed}"
+            )
+        if self.uttt_ai_select_best and self.game != "uttt":
+            raise ValueError("uttt_ai_select_best is only valid for game=uttt")
+        if self.uttt_ai_select_best and self.uttt_ai_eval_interval <= 0:
+            raise ValueError(
+                "uttt_ai_eval_interval must be positive when uttt_ai_select_best is enabled"
+            )
+        if self.uttt_macro_transformer_heads < 1:
+            raise ValueError(
+                "uttt_macro_transformer_heads must be >= 1, "
+                f"got {self.uttt_macro_transformer_heads}"
+            )
+        if self.uttt_macro_transformer_ff_mult <= 0.0:
+            raise ValueError(
+                "uttt_macro_transformer_ff_mult must be > 0, "
+                f"got {self.uttt_macro_transformer_ff_mult}"
+            )
+        if not 0.0 <= self.uttt_macro_transformer_dropout < 1.0:
+            raise ValueError(
+                "uttt_macro_transformer_dropout must be in [0, 1), "
+                f"got {self.uttt_macro_transformer_dropout}"
+            )
+        if not isinstance(self.temp_decay_half_life, (int, float)):
+            raise ValueError(
+                f"temp_decay_half_life must be a number, "
                 f"got {type(self.temp_decay_half_life).__name__}"
             )
+        if self.temp_decay_half_life < 0:
+            raise ValueError("temp_decay_half_life must be non-negative")
 
     @property
     def network_name(self) -> str:
@@ -327,9 +437,12 @@ class TrainConfig:
 
     @property
     def auto_experiment_name(self) -> str:
+        macro_suffix = ""
+        if self.uttt_hierarchical and self.uttt_macro_channels > 0:
+            macro_suffix = f"-{self.uttt_macro_channels}mc"
         return (
             f"{self.network_name}-{self.depth}d-{self.channels}c"
-            f"-{self.kernel_size}k-{self.selfplay_mcts_visits}sims"
+            f"{macro_suffix}-{self.kernel_size}k-{self.selfplay_mcts_visits}sims"
         )
 
     @property
@@ -427,7 +540,11 @@ def load_config(yaml_path: str, cli_overrides: dict, warn=True) -> TrainConfig:
             # "1e-4" as a string, not a float. Coerce to the field's declared
             # type when the default is numeric and the YAML value is a string.
             field_type = type(getattr(config, key))
-            if field_type in (int, float) and isinstance(val, str):
+            if (
+                field_type in (int, float)
+                and isinstance(val, str)
+                and key != "temp_decay_half_life"
+            ):
                 val = field_type(val)
             setattr(config, key, val)
 

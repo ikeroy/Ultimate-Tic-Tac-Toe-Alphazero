@@ -31,7 +31,7 @@ from game_runner import (
 )
 from config import TrainConfig
 
-Game = alphazero.Connect4GS
+Game = alphazero.UltimateTicTacToeGS
 
 
 # ============================================================
@@ -48,6 +48,46 @@ def test_roundtrip_float32(tmp_path):
     assert loaded.shape == original.shape
     assert loaded.dtype == get_storage_dtype()  # float16
     assert torch.allclose(original, loaded.float(), atol=0.01, rtol=0.01)
+
+
+def test_optimizer_selection_defaults_to_sgd():
+    nn = NNWrapper(Game, NNArgs(num_channels=8, depth=2, kernel_size=3))
+
+    assert isinstance(nn.optimizer, torch.optim.SGD)
+    assert nn.optimizer.param_groups[0]["momentum"] == pytest.approx(0.9)
+
+
+def test_adamw_checkpoint_roundtrip(tmp_path):
+    args = NNArgs(
+        num_channels=8,
+        depth=2,
+        kernel_size=3,
+        optimizer="adamw",
+        lr=0.003,
+        weight_decay=0.0002,
+        adamw_beta1=0.85,
+        adamw_beta2=0.97,
+        adamw_eps=1e-7,
+    )
+    nn = NNWrapper(Game, args)
+    assert isinstance(nn.optimizer, torch.optim.AdamW)
+
+    # Populate optimizer moments so the test covers state loading, not only
+    # optimizer construction.
+    loss = sum(parameter.square().mean() for parameter in nn.nnet.parameters())
+    loss.backward()
+    nn.optimizer.step()
+    nn.save_checkpoint(str(tmp_path), "adamw.pt")
+
+    loaded = NNWrapper.load_checkpoint(Game, str(tmp_path), "adamw.pt")
+
+    assert isinstance(loaded.optimizer, torch.optim.AdamW)
+    assert loaded.args.optimizer == "adamw"
+    assert loaded.optimizer.param_groups[0]["lr"] == pytest.approx(0.003)
+    assert loaded.optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.0002)
+    assert loaded.optimizer.param_groups[0]["betas"] == pytest.approx((0.85, 0.97))
+    assert loaded.optimizer.param_groups[0]["eps"] == pytest.approx(1e-7)
+    assert loaded.optimizer.state_dict()["state"]
 
 
 def test_roundtrip_integer_values(tmp_path):
@@ -918,7 +958,7 @@ def test_streaming_dataset_trains_nn(tmp_path):
 
 def test_train_index_then_extract(tmp_path):
     """train() uses index-then-extract and produces valid loss."""
-    config = TrainConfig(train_batch_size=64)
+    config = TrainConfig(train_batch_size=64, loader_threads=0)
     exp_dir = str(tmp_path / "experiment")
     paths = config.resolve_paths(exp_dir)
     for key in ("checkpoint", "history"):
@@ -957,9 +997,64 @@ def test_train_index_then_extract(tmp_path):
     assert os.path.exists(os.path.join(paths["checkpoint"], f"0003-{experiment_name}.pt"))
 
 
+def test_train_can_load_best_parent_while_saving_next_iter(tmp_path, monkeypatch):
+    """train(parent_iteration=best) discards failed latest parents."""
+    config = TrainConfig(train_batch_size=64, loader_threads=0)
+    exp_dir = str(tmp_path / "experiment")
+    paths = config.resolve_paths(exp_dir)
+    for key in ("checkpoint", "history"):
+        os.makedirs(paths[key], exist_ok=True)
+
+    cs = Game.CANONICAL_SHAPE()
+    experiment_name = "test"
+    for i in range(4):
+        n = 100
+        c = torch.randn(n, cs[0], cs[1], cs[2])
+        v = torch.softmax(torch.randn(n, Game.NUM_PLAYERS() + 1), dim=1)
+        p = torch.softmax(torch.randn(n, Game.NUM_MOVES()), dim=1)
+        save_compressed(c, os.path.join(paths["history"], f"{i:04d}-0000-canonical-{n}.ptz"))
+        save_compressed(v, os.path.join(paths["history"], f"{i:04d}-0000-v-{n}.ptz"))
+        save_compressed(p, os.path.join(paths["history"], f"{i:04d}-0000-pi-{n}.ptz"))
+
+    loaded = []
+    saved = []
+
+    class FakeNN:
+        def set_lr(self, lr):
+            pass
+
+        def train(self, dataloader, steps_to_train, run, iteration, total_train_steps,
+                  ema_averaging=True):
+            return 0.1, 0.2
+
+        def save_checkpoint(self, folder, filename, zstd_level=1):
+            saved.append(filename)
+
+    def fake_load_checkpoint(GameCls, folder, filename):
+        loaded.append(filename)
+        return FakeNN()
+
+    monkeypatch.setattr("neural_net.NNWrapper.load_checkpoint", fake_load_checkpoint)
+
+    class DummyRun:
+        def track(*a, **kw):
+            pass
+
+    v_loss, pi_loss, total = train(
+        config, paths, experiment_name, 3, 3, DummyRun(), 0,
+        parent_iteration=1,
+    )
+
+    assert math.isfinite(v_loss)
+    assert math.isfinite(pi_loss)
+    assert total > 0
+    assert loaded == [f"0001-{experiment_name}.pt"]
+    assert saved == [f"0004-{experiment_name}.pt"]
+
+
 def test_train_subsamples_when_window_large(tmp_path):
     """When window has many more samples than needed, train() subsamples."""
-    config = TrainConfig(train_batch_size=64)
+    config = TrainConfig(train_batch_size=64, loader_threads=0)
     exp_dir = str(tmp_path / "experiment")
     paths = config.resolve_paths(exp_dir)
     for key in ("checkpoint", "history"):
@@ -1135,7 +1230,7 @@ def test_bootstrap_retrain_with_reservoir(tmp_path):
         def track(*a, **kw):
             pass
 
-    config = TrainConfig(game="connect4", bootstrap_eval_interval=50)
+    config = TrainConfig(game="uttt", bootstrap_eval_interval=50)
 
     # Call _bootstrap_retrain directly
     total_train_steps = _bootstrap_retrain(
@@ -1187,7 +1282,7 @@ def test_bootstrap_train_phase_early_stop(tmp_path):
     file_triples = _make_bootstrap_triples(tmp_path, n_files=4, samples_per_file=200)
 
     config = TrainConfig(
-        game="connect4",
+        game="uttt",
         train_batch_size=32,
         bootstrap_eval_interval=5,
         bootstrap_lr_patience=2,
@@ -1220,7 +1315,7 @@ def test_bootstrap_lr_drops_with_default_patience(tmp_path):
     # this tiny dataset doesn't keep qualifying as "real improvement" and
     # resetting num_bad before patience expires.
     config = TrainConfig(
-        game="connect4",
+        game="uttt",
         train_batch_size=32,
         bootstrap_eval_interval=10,
         bootstrap_lr_patience=4,
@@ -1252,7 +1347,7 @@ def test_bootstrap_full_lr_drops_and_early_stop(tmp_path):
     # lookback=5, lr_patience=5*2=10, convergence_patience=5*2=10
     # max_drops=2: step 15 drop1, step 25 drop2 (final), step 35 early stop
     config = TrainConfig(
-        game="connect4",
+        game="uttt",
         train_batch_size=32,
         bootstrap_eval_interval=5,
         bootstrap_lr_patience=2,
@@ -1306,7 +1401,7 @@ def test_bootstrap_no_early_stop_on_learnable_data(tmp_path):
         file_triples.append((c_path, v_path, pi_path, n))
 
     config = TrainConfig(
-        game="connect4",
+        game="uttt",
         train_batch_size=32,
         bootstrap_eval_interval=5,
         bootstrap_lr_patience=2,
@@ -1343,7 +1438,7 @@ def test_bootstrap_no_early_stop_on_learnable_data(tmp_path):
 
 def test_exploit_symmetries_disk_creates_syms_files(tmp_path):
     """exploit_symmetries reads raw files from tmp_history and writes -syms- files."""
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     cs = Game.CANONICAL_SHAPE()
     iteration = 0
 
@@ -1380,9 +1475,8 @@ def test_exploit_symmetries_disk_creates_syms_files(tmp_path):
 
 def test_exploit_symmetries_no_op_for_no_symmetries(tmp_path):
     """exploit_symmetries is a no-op when NUM_SYMMETRIES <= 1."""
-    # Brandubh has 8 symmetries, but we need a game with <= 1.
-    # Instead, just verify that with no files, it's a no-op.
-    config = TrainConfig(game="connect4")
+    # With no history files, symmetry exploitation should be a no-op.
+    config = TrainConfig(game="uttt")
     tmp_hist = str(tmp_path / "tmp_history")
     os.makedirs(tmp_hist, exist_ok=True)
     paths = {"tmp_history": tmp_hist}
@@ -1395,7 +1489,7 @@ def test_exploit_symmetries_no_op_for_no_symmetries(tmp_path):
 
 def test_exploit_symmetries_data_integrity(tmp_path):
     """Symmetrized data has correct shapes and is loadable."""
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     cs = Game.CANONICAL_SHAPE()
     iteration = 2
 
@@ -1427,7 +1521,7 @@ def test_exploit_symmetries_data_integrity(tmp_path):
 
 def test_exploit_symmetries_multiple_raw_files(tmp_path):
     """exploit_symmetries handles multiple raw file batches."""
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     cs = Game.CANONICAL_SHAPE()
     iteration = 1
 
@@ -1461,7 +1555,7 @@ def test_exploit_symmetries_multiple_raw_files(tmp_path):
 
 def test_resample_by_surprise_disk_pipeline(tmp_path):
     """resample_by_surprise reads from tmp_history, writes to history, cleans tmp."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0
@@ -1501,7 +1595,7 @@ def test_resample_by_surprise_disk_pipeline(tmp_path):
 
 def test_resample_by_surprise_preserves_data_shapes(tmp_path):
     """Resampled files have correct tensor shapes."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0
@@ -1538,7 +1632,7 @@ def test_resample_by_surprise_preserves_data_shapes(tmp_path):
 
 def test_resample_by_surprise_multiple_files(tmp_path):
     """resample_by_surprise handles multiple input files from tmp_history."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0
@@ -1575,9 +1669,45 @@ def test_resample_by_surprise_multiple_files(tmp_path):
         f"Resampled count {total_resampled} seems too high for {total_input} input"
 
 
+def test_resample_by_surprise_handles_invalid_losses(tmp_path, monkeypatch):
+    """Invalid per-sample losses fall back to nonnegative copy counts."""
+    config = TrainConfig(game="uttt", train_batch_size=32)
+    cs = Game.CANONICAL_SHAPE()
+    experiment_name = "test"
+    iteration = 0
+
+    exp_dir = str(tmp_path / "experiment")
+    paths = config.resolve_paths(exp_dir)
+    for key in ("history", "tmp_history"):
+        os.makedirs(paths[key], exist_ok=True)
+
+    n = 6
+    c = torch.randn(n, cs[0], cs[1], cs[2])
+    v = torch.softmax(torch.randn(n, Game.NUM_PLAYERS() + 1), dim=1)
+    pi = torch.softmax(torch.randn(n, Game.NUM_MOVES()), dim=1)
+    save_compressed(c, os.path.join(paths["tmp_history"], f"{iteration:04d}-0000-canonical-{n}.ptz"))
+    save_compressed(v, os.path.join(paths["tmp_history"], f"{iteration:04d}-0000-v-{n}.ptz"))
+    save_compressed(pi, os.path.join(paths["tmp_history"], f"{iteration:04d}-0000-pi-{n}.ptz"))
+
+    class DummyNN:
+        def sample_loss(self, _dl, size):
+            assert size == n
+            return np.array([np.nan, np.inf, -1.0, 0.0, 1.0, 2.0])
+
+    monkeypatch.setattr(NNWrapper, "load_checkpoint", lambda *args, **kwargs: DummyNN())
+
+    loss_for_logging = resample_by_surprise(config, paths, experiment_name, iteration)
+
+    hist_triples = glob_file_triples(paths["history"], f"{iteration:04d}-*-canonical-*.ptz")
+    total_resampled = sum(s for _, _, _, s in hist_triples)
+    assert total_resampled > 0
+    assert np.all(np.isfinite(loss_for_logging))
+    assert np.all(loss_for_logging >= 0)
+
+
 def test_resample_clears_old_history(tmp_path):
     """resample_by_surprise clears previous history files for the iteration."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0
@@ -1619,7 +1749,7 @@ def test_resample_clears_old_history(tmp_path):
 
 def test_exploit_symmetries_idempotent_rerun(tmp_path):
     """Simulate crash (leave raw+syms files), re-run, verify no duplicates."""
-    config = TrainConfig(game="connect4")
+    config = TrainConfig(game="uttt")
     cs = Game.CANONICAL_SHAPE()
     iteration = 0
 
@@ -1658,7 +1788,7 @@ def test_exploit_symmetries_idempotent_rerun(tmp_path):
 
 def test_resample_zero_loss_guard(tmp_path):
     """All-zero loss produces uniform copies instead of NaN."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0
@@ -1698,7 +1828,7 @@ def test_resample_zero_loss_guard(tmp_path):
 
 def test_exploit_symmetries_then_resample_pipeline(tmp_path):
     """Full pipeline: exploit_symmetries → resample_by_surprise on disk."""
-    config = TrainConfig(game="connect4", train_batch_size=32)
+    config = TrainConfig(game="uttt", train_batch_size=32)
     cs = Game.CANONICAL_SHAPE()
     experiment_name = "test"
     iteration = 0

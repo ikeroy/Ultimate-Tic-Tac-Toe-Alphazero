@@ -270,8 +270,11 @@ void PlayManager::play() {
             }
           }
         }
+        const bool use_gumbel_search =
+            static_cast<bool>(seat_gumbel_enabled_[game.perm_index][cp]) &&
+            !game.capped;
         uint32_t chosen_m;
-        if (params_.gumbel_enabled && !game.capped) {
+        if (use_gumbel_search) {
           // Gumbel: deterministic argmax over final-phase survivors; temp
           // is irrelevant because Gumbel noise already perturbed the prior.
           chosen_m = mcts.gumbel_final_action();
@@ -280,11 +283,23 @@ void PlayManager::play() {
           chosen_m = MCTS::pick_move(pi);
         }
         if (params_.history_enabled && !game.capped) {
+          Vector<float> history_value;
+          if (params_.history_value_target == HistoryValueTarget::ROOT) {
+            history_value = mcts.root_value();
+            if (!base_gs_->relative_values()) {
+              history_value = relative_to_absolute(
+                  history_value, game.gs->current_player(),
+                  base_gs_->num_players());
+            }
+          } else {
+            history_value = Vector<float>{game.v.size()};
+            history_value.setZero();
+          }
           PlayHistory ph{
               .canonical = Tensor<float, 3>{game.gs->canonicalized()},
-              .v = Vector<float>{game.v.size()},
+              .v = std::move(history_value),
               .pi = Vector<float>{
-                  params_.gumbel_enabled
+                  use_gumbel_search
                       ? mcts.gumbel_improved_policy()
                       : ((params_.policy_target_pruning &&
                           seat_epsilon_[game.perm_index][cp] > 0)
@@ -292,7 +307,6 @@ void PlayManager::play() {
                              : mcts.probs(1.0))
               },
           };
-          ph.v.setZero();
           game.partial_history.push_back(
               PendingHistory{.ph = std::move(ph),
                              .player = game.gs->current_player()});
@@ -323,12 +337,14 @@ void PlayManager::play() {
           if (params_.history_enabled) {
             while (!game.partial_history.empty()) {
               auto& pending = game.partial_history.back();
-              if (base_gs_->relative_values()) {
-                pending.ph.v = absolute_to_relative(
-                    scores.value(), pending.player,
-                    base_gs_->num_players());
-              } else {
-                pending.ph.v = scores.value();
+              if (params_.history_value_target == HistoryValueTarget::FINAL) {
+                if (base_gs_->relative_values()) {
+                  pending.ph.v = absolute_to_relative(
+                      scores.value(), pending.player,
+                      base_gs_->num_players());
+                } else {
+                  pending.ph.v = scores.value();
+                }
               }
               history_.push(std::move(pending.ph));
               game.partial_history.pop_back();
@@ -398,11 +414,11 @@ void PlayManager::play() {
         game.capped = params_.playout_cap_randomization &&
                       (dist(re) < params_.playout_cap_percent);
         // Capped self-play searches use PUCT (sims_target=0 disables Gumbel),
-        // even when gumbel_enabled. Connect4 retest showed that Gumbel-at-
+        // even when gumbel_enabled. Retesting showed that Gumbel-at-
         // capped-visits (high inherent variance ~40% at low visits) produces
         // noisier game trajectories than PUCT-at-capped, hurting training
         // data quality. v1 design (Gumbel for full + PUCT for capped) beats
-        // v2 (Gumbel everywhere) by 217 elo at equal compute on Connect4.
+        // v2 (Gumbel everywhere) at equal compute.
         {
           const auto next_cp_g = game.gs->current_player();
           const auto sims_target = game.capped
@@ -423,7 +439,8 @@ void PlayManager::play() {
           auto& next_mcts = game.mcts[next_cp];
           if (next_mcts.root_n() > 0) {
             next_mcts.apply_root_policy_temp();
-            if (seat_epsilon_[game.perm_index][next_cp] > 0 && !game.capped) {
+            if (seat_epsilon_[game.perm_index][next_cp] > 0 && !game.capped &&
+                !static_cast<bool>(seat_gumbel_enabled_[game.perm_index][next_cp])) {
               next_mcts.add_root_noise();
             }
           }

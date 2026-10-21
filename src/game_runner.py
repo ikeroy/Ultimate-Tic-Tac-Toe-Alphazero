@@ -4,8 +4,8 @@ import json
 import os
 import signal
 import shutil
+import sys
 import tempfile
-import warnings
 from collections import deque, namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
@@ -25,157 +25,59 @@ from config import load_config, find_latest_checkpoint
 from tracy_utils import tracy_zone, tracy_thread, TracyZone, tracy_frame
 import frozen_eval
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _ensure_project_root_importable():
+    if _PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT)
+
+
 def _fmt_pct(x):
     pct = x * 100
     return f"{int(pct)}%" if pct == int(pct) else f"{pct:.1f}%"
 
 
-# ============================================================================
-# Unified Star Gambit variant mixing helpers
-# ============================================================================
-
-UNIFIED_VARIANT_NAMES = ["skirmish", "showdown", "clash", "battle"]
-_UNIFIED_GAME_NAMES = frozenset({
-    "star_gambit_unified",
-    "star_gambit_unified_skirmish",
-    "star_gambit_unified_showdown",
-    "star_gambit_unified_clash",
-    "star_gambit_unified_battle",
-})
+def _make_game_instance(config, probs=None):
+    """Create a fresh UTTT game state."""
+    return config.Game()
 
 
 def _is_unified_game(config):
-    return config.game in _UNIFIED_GAME_NAMES
+    """UTTT has no runtime game variants."""
+    return False
+
+
+UNIFIED_VARIANT_NAMES = []
 
 
 def _compute_unified_probs(config, prev_sample_counts=None):
-    """Variant selection probabilities [skirmish, showdown, clash, battle].
-
-    game_based: variant_fractions used directly as game probabilities.
-    sample_based: adjust game probabilities each iteration so actual sample
-                  fractions approach the target (uses previous iteration's counts).
-    """
-    if config.variant_fractions:
-        target = [config.variant_fractions.get(v, 0.0) for v in UNIFIED_VARIANT_NAMES]
-    else:
-        target = [0.25] * 4
-    total = sum(target) or 1.0
-    target = [t / total for t in target]
-
-    if config.variant_mixing_mode != "sample_based" or prev_sample_counts is None:
-        probs = target
-    else:
-        total_samples = sum(prev_sample_counts)
-        if total_samples == 0:
-            probs = target
-        else:
-            actual = [c / total_samples for c in prev_sample_counts]
-            # Scale each variant's game prob by target/actual so sample fractions converge.
-            adjusted = [target[v] / actual[v] if actual[v] > 1e-6 else target[v] * 4.0
-                        for v in range(4)]
-            s = sum(adjusted) or 1.0
-            probs = [a / s for a in adjusted]
-
-    # Guarantee a minimum probability so no variant is starved of games.
-    MIN_PROB = 0.02
-    probs = [max(p, MIN_PROB) for p in probs]
-    s = sum(probs)
-    return [p / s for p in probs]
+    return None
 
 
 def _compute_gating_probs(config):
-    """Variant selection probabilities to use during gating evaluation."""
-    weights = config.gating_variant_weights or config.variant_fractions or {}
-    if not weights:
-        return [0.25] * 4
-    probs = [weights.get(v, 0.0) for v in UNIFIED_VARIANT_NAMES]
-    total = sum(probs) or 1.0
-    return [p / total for p in probs]
-
-
-def _make_game_instance(config, probs=None):
-    """Create a game instance; for star_gambit_unified injects variant probs."""
-    Game = config.Game
-    if config.game == "star_gambit_unified" and probs is not None:
-        return Game(probs=probs)
-    return Game()
-
-
-_VARIANT_METRIC_TRACK_NAMES = {
-    "game_length": ("average_game_length", None),
-    "avg_depth": ("avg_leaf_depth", {"search": "full"}),
-    "avg_entropy": ("search_entropy", {"search": "full"}),
-    "fast_avg_depth": ("avg_leaf_depth", {"search": "fast"}),
-    "fast_avg_entropy": ("search_entropy", {"search": "fast"}),
-    "avg_mpt": ("moves_per_turn", None),
-    "avg_vm": ("avg_valid_moves", None),
-}
-
-
-def _track_variant_play_metrics(run, variant_metrics, *, epoch, step, vs_context):
-    """Track per-variant play metrics on the aim Run with consistent metric names."""
-    if not variant_metrics:
-        return
-    for vid, metrics in variant_metrics.items():
-        vname = UNIFIED_VARIANT_NAMES[vid]
-        for key, value in metrics.items():
-            name_extra = _VARIANT_METRIC_TRACK_NAMES.get(key)
-            if name_extra is None:
-                continue
-            metric_name, extra = name_extra
-            if key.startswith("fast_") and not value:
-                continue
-            ctx = {"vs": vs_context, "variant": vname}
-            if extra:
-                ctx.update(extra)
-            run.track(value, name=metric_name, epoch=epoch, step=step, context=ctx)
-
-
-def _collect_variant_metrics(pm, include_fast=False):
-    """Return {vid: {metric: value}} for variants with completed games.
-
-    Metrics: game_length, avg_depth, avg_entropy, avg_mpt, avg_vm
-    (plus fast_avg_depth/fast_avg_entropy when include_fast=True).
-    Empty dict for non-unified games.
-    """
-    out = {}
-    for vid in range(pm.num_tracked_variants()):
-        if pm.variant_games_completed(vid) == 0:
-            continue
-        m = {
-            "game_length": pm.variant_avg_game_length(vid),
-            "avg_depth": pm.variant_avg_leaf_depth(vid),
-            "avg_entropy": pm.variant_avg_search_entropy(vid),
-            "avg_mpt": pm.variant_avg_moves_per_turn(vid),
-            "avg_vm": pm.variant_avg_valid_moves(vid),
-        }
-        if include_fast:
-            m["fast_avg_depth"] = pm.variant_fast_avg_leaf_depth(vid)
-            m["fast_avg_entropy"] = pm.variant_fast_avg_search_entropy(vid)
-        out[vid] = m
-    return out
+    return None
 
 
 def _count_variant_samples(paths, iteration):
-    """Count samples per variant from an iteration's history files.
+    return None
 
-    Returns [skirmish, showdown, clash, battle] counts or None if unavailable.
-    Reads channel 32+v at grid position (6,6) — board center, always a valid hex.
-    """
-    c_files = _glob_hist_files(paths["history"], f"{iteration:04d}-*-canonical-*")
-    if not c_files:
-        return None
-    counts = [0, 0, 0, 0]
-    for c_path in c_files:
-        try:
-            c = load_compressed(c_path).float()
-            if c.ndim != 4 or c.shape[1] < 36:
-                continue
-            for v in range(4):
-                counts[v] += int((c[:, 32 + v, 6, 6] > 0.5).sum().item())
-        except Exception:
-            pass
-    return counts if sum(counts) > 0 else None
+
+def _collect_variant_metrics(pm, include_fast=False):
+    return {}
+
+
+def _track_variant_play_metrics(run, variant_metrics, *, epoch, step, vs_context):
+    return None
+
+
+def _analyze_iteration_variants(config, paths, experiment_name, iteration):
+    return {}
+
+
+def _generate_visualizations(config, paths, iteration, run, total_train_steps,
+                             variant_stats=None):
+    return None
 
 
 def save_compressed(tensor, path, half_storage=True, zstd_level=1):
@@ -241,12 +143,12 @@ def _sample_recent_history_batch(paths, batch_size):
     return tensor[idx]
 
 
-def prepare_inference_model(nn, config):
+def prepare_inference_model(nn, config, compile=False):
     """Apply inference optimizations from config."""
     if hasattr(nn, 'enable_inference_optimizations'):
         nn.enable_inference_optimizations(
             amp=config.amp_inference,
-            compile=config.torch_compile,
+            compile=compile,
         )
 
 
@@ -268,6 +170,91 @@ def glob_file_triples(directory, pattern="*-canonical-*.ptz"):
         size = int(c_path.rsplit("-", 1)[-1].split(".")[0])
         triples.append((c_path, v_path, pi_path, size))
     return triples
+
+
+def resolve_history_dir(dataset_dir):
+    """Return a dataset's history directory, accepting either layout."""
+    nested = os.path.join(dataset_dir, "history")
+    return nested if os.path.isdir(nested) else dataset_dir
+
+
+def select_training_work_items(file_triples, samples_needed, *, allow_replacement=False):
+    """Choose compressed-history rows without materializing the source data.
+
+    Normal self-play keeps the old behavior: when it needs more rows than are
+    available, it returns every row and lets the training loop make additional
+    passes. Anchor-mixed training instead samples with replacement so both
+    sources retain the requested per-update ratio during early iterations.
+    """
+    if samples_needed < 0:
+        raise ValueError(f"samples_needed must be non-negative, got {samples_needed}")
+    if not file_triples:
+        raise ValueError("cannot select training samples from an empty dataset")
+    if samples_needed == 0:
+        return []
+
+    sizes = [size for _, _, _, size in file_triples]
+    total_size = sum(sizes)
+    if total_size <= 0:
+        raise ValueError("cannot select training samples from a zero-size dataset")
+
+    if samples_needed >= total_size and not allow_replacement:
+        selected_per_file = [list(range(size)) for size in sizes]
+    else:
+        if samples_needed <= total_size:
+            all_indices = sorted(random.sample(range(total_size), samples_needed))
+        else:
+            all_indices = sorted(random.choices(range(total_size), k=samples_needed))
+
+        cumulative_sizes = []
+        cumulative = 0
+        for size in sizes:
+            cumulative_sizes.append(cumulative)
+            cumulative += size
+        selected_per_file = [[] for _ in file_triples]
+        file_index = 0
+        for index in all_indices:
+            while (
+                file_index < len(cumulative_sizes) - 1
+                and index >= cumulative_sizes[file_index + 1]
+            ):
+                file_index += 1
+            selected_per_file[file_index].append(index - cumulative_sizes[file_index])
+
+    return [
+        (c_path, v_path, pi_path, selected_per_file[index])
+        for index, (c_path, v_path, pi_path, _) in enumerate(file_triples)
+        if selected_per_file[index]
+    ]
+
+
+def load_selected_training_samples(work_items, num_workers, desc):
+    """Load selected history rows in parallel and concatenate them once."""
+    if not work_items:
+        raise ValueError("cannot load an empty training selection")
+
+    selected = []
+    if num_workers <= 1:
+        for item in tqdm.tqdm(work_items, desc=desc, leave=False):
+            selected.append(_load_and_select(item))
+    else:
+        results = [None] * len(work_items)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_index = {
+                executor.submit(_load_and_select, item): index
+                for index, item in enumerate(work_items)
+            }
+            for future in tqdm.tqdm(
+                as_completed(future_to_index),
+                total=len(future_to_index),
+                desc=desc,
+                leave=False,
+            ):
+                results[future_to_index[future]] = future.result()
+        selected = results
+
+    canonical, values, policies = zip(*selected)
+    return torch.cat(canonical), torch.cat(values), torch.cat(policies)
 
 
 def _load_triple(args):
@@ -345,8 +332,9 @@ GRArgs = namedtuple(
         "mcts_workers",
         "record_batch_metrics",
         "data_folder",
+        "progress_path",
     ],
-    defaults=(0, 30_000, os.cpu_count() - 1, False, None),
+    defaults=(0, 30_000, os.cpu_count() - 1, False, None, None),
 )
 
 
@@ -594,6 +582,23 @@ class GameRunner:
             postfix["wr"] = "/".join(_fmt_pct(x) for x in win_rates)
             return postfix, completed
 
+        def _write_progress(postfix, completed):
+            if not self.args.progress_path:
+                return
+            progress = {
+                "title": self.args.title,
+                "completed_games": int(completed),
+                "total_games": int(n),
+                "remaining_games": int(max(0, n - completed)),
+                "postfix": postfix,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            tmp_path = self.args.progress_path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(progress, f, indent=2)
+                f.write("\n")
+            os.replace(tmp_path, self.args.progress_path)
+
         while self.pm.remaining_games() > 0:
             try:
                 self.monitor_queue.get(timeout=1)
@@ -601,12 +606,14 @@ class GameRunner:
                 pass
             if time.time() - last_update > 1:
                 postfix, completed = _build_postfix()
+                _write_progress(postfix, completed)
                 pbar.set_postfix(postfix)
                 pbar.update(completed - last_completed)
                 last_completed = completed
                 last_update = time.time()
 
         postfix, completed = _build_postfix()
+        _write_progress(postfix, completed)
         pbar.set_postfix(postfix)
         pbar.update(n - last_completed)
         pbar.close()
@@ -758,13 +765,7 @@ def base_params(config, start_temp, bs, cb):
     params.max_cache_size = config.max_cache_size
     params.cpuct = config.cpuct
     params.start_temp = start_temp
-    if isinstance(config.temp_decay_half_life, dict):
-        params.temp_decay_half_life = 0.0
-        params.temp_decay_half_life_by_variant = [
-            float(config.temp_decay_half_life[v]) for v in UNIFIED_VARIANT_NAMES
-        ]
-    else:
-        params.temp_decay_half_life = float(config.temp_decay_half_life)
+    params.temp_decay_half_life = float(config.temp_decay_half_life)
     params.final_temp = config.final_temp
     params.max_batch_size = bs
     params.concurrent_games = bs * cb
@@ -917,10 +918,15 @@ def _katago_window_curve(c, alpha, beta, ratio):
 def games_per_iter(config):
     """Total games produced per training iteration.
 
-    Constant given the self-play config — equals self_play_batch_size *
-    NUM_PLAYERS * self_play_concurrent_batch_mult * self_play_chunks (see
-    self_play() in this module). NUM_PLAYERS is sourced from config.Game.
+    Constant given the self-play config. By default this equals
+    self_play_batch_size * NUM_PLAYERS * self_play_concurrent_batch_mult *
+    self_play_chunks (see self_play() in this module). A positive
+    self_play_games_per_iter overrides that product so GPU batch sizing can be
+    tuned independently from generated data volume.
     """
+    override = int(getattr(config, "self_play_games_per_iter", 0) or 0)
+    if override > 0:
+        return override
     return (
         config.self_play_batch_size
         * config.Game.NUM_PLAYERS()
@@ -1139,13 +1145,16 @@ def resample_by_surprise(config, paths, experiment_name, iteration):
             del c_t, v_t, pi_t, ds, dl
     del nn
 
-    loss = np.concatenate(loss_arrays)
+    loss = np.concatenate(loss_arrays).astype(np.float64, copy=False)
     del loss_arrays
     sample_count = len(loss)
+    valid_loss = np.isfinite(loss) & (loss >= 0)
+    if not np.all(valid_loss):
+        loss = np.where(valid_loss, loss, 0.0)
     total_loss = np.sum(loss)
 
     # Compute copy counts vectorized
-    if total_loss <= 0:
+    if not np.isfinite(total_loss) or total_loss <= 0:
         copies = np.ones(sample_count, dtype=np.int64)
     else:
         weights = 0.5 + (loss / total_loss) * 0.5 * sample_count
@@ -1248,7 +1257,8 @@ def iteration_loss(config, paths, experiment_name, iteration):
 
 
 @tracy_zone
-def train(config, paths, experiment_name, iteration, hist_size, run, total_train_steps, lr=None):
+def train(config, paths, experiment_name, iteration, hist_size, run, total_train_steps,
+          lr=None, parent_iteration=None):
     """Index-then-extract training: pre-select samples, load one file at a time.
 
     Memory bounded at ~1.5 GB regardless of window size.
@@ -1276,54 +1286,68 @@ def train(config, paths, experiment_name, iteration, hist_size, run, total_train
     steps_to_train = int(math.ceil(average_generation / bs * config.train_sample_rate))
     samples_needed = steps_to_train * bs
 
-    # Phase 2: Pre-select sample indices
-    if samples_needed >= total_size:
-        # Use all samples (early iterations)
-        selected_per_file = [list(range(s)) for s in sizes]
-    else:
-        # Generate sorted random indices, map to (file_idx, local_offset)
-        all_indices = sorted(random.sample(range(total_size), samples_needed))
-        cum_sizes = []
-        cum = 0
-        for s in sizes:
-            cum_sizes.append(cum)
-            cum += s
-        selected_per_file = [[] for _ in range(len(file_triples))]
-        fi = 0
-        for idx in all_indices:
-            while fi < len(cum_sizes) - 1 and idx >= cum_sizes[fi + 1]:
-                fi += 1
-            selected_per_file[fi].append(idx - cum_sizes[fi])
+    # Phase 2: Select self-play and, optionally, fixed teacher-anchor rows.
+    # Anchor mode samples with replacement when a small initial history would
+    # otherwise be traversed repeatedly; this preserves the configured mix in
+    # every optimization update instead of letting the anchor dominate early.
+    anchor_fraction = float(getattr(config, "teacher_anchor_fraction", 0.0))
+    anchor_triples = []
+    anchor_samples = 0
+    selfplay_samples = samples_needed
+    if anchor_fraction > 0.0:
+        anchor_dir = resolve_history_dir(config.teacher_anchor_dir)
+        anchor_triples = glob_file_triples(anchor_dir, "*-canonical-*.ptz")
+        if not anchor_triples:
+            anchor_triples = glob_file_triples(anchor_dir, "*-canonical-*.pt")
+        if not anchor_triples:
+            raise RuntimeError(
+                f"teacher anchor dataset has no history triples: {config.teacher_anchor_dir}"
+            )
+        if samples_needed < 2:
+            raise RuntimeError("teacher anchor mixing requires at least two training samples")
+        anchor_samples = max(1, min(samples_needed - 1, round(samples_needed * anchor_fraction)))
+        selfplay_samples = samples_needed - anchor_samples
 
-    # Phase 3: Load files and extract selected indices (parallel)
-    work_items = [
-        (c_path, v_path, pi_path, selected_per_file[i])
-        for i, (c_path, v_path, pi_path, _) in enumerate(file_triples)
-        if selected_per_file[i]
-    ]
-
+    selfplay_work_items = select_training_work_items(
+        file_triples,
+        selfplay_samples,
+        allow_replacement=bool(anchor_triples),
+    )
     num_workers = config.resolved_loader_threads
-    acc_c, acc_v, acc_pi = [], [], []
-    if num_workers <= 1:
-        for item in tqdm.tqdm(work_items, desc="Extracting Training Samples", leave=False):
-            c, v, pi = _load_and_select(item)
-            acc_c.append(c); acc_v.append(v); acc_pi.append(pi)
-    else:
-        results = [None] * len(work_items)
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_idx = {executor.submit(_load_and_select, item): i for i, item in enumerate(work_items)}
-            for future in tqdm.tqdm(
-                as_completed(future_to_idx), total=len(future_to_idx),
-                desc="Extracting Training Samples", leave=False,
-            ):
-                results[future_to_idx[future]] = future.result()
-        for c, v, pi in results:
-            acc_c.append(c); acc_v.append(v); acc_pi.append(pi)
+    c_data, v_data, pi_data = load_selected_training_samples(
+        selfplay_work_items,
+        num_workers,
+        "Extracting Self-Play Samples",
+    )
 
-    c_data = torch.cat(acc_c)
-    v_data = torch.cat(acc_v)
-    pi_data = torch.cat(acc_pi)
-    del acc_c, acc_v, acc_pi
+    if anchor_triples:
+        anchor_work_items = select_training_work_items(
+            anchor_triples,
+            anchor_samples,
+            allow_replacement=True,
+        )
+        anchor_c, anchor_v, anchor_pi = load_selected_training_samples(
+            anchor_work_items,
+            num_workers,
+            "Extracting Teacher Anchor",
+        )
+        c_data = torch.cat((c_data, anchor_c))
+        v_data = torch.cat((v_data, anchor_v))
+        pi_data = torch.cat((pi_data, anchor_pi))
+        del anchor_c, anchor_v, anchor_pi
+        actual_fraction = anchor_samples / samples_needed
+        run.track(
+            anchor_samples,
+            name="teacher_anchor_samples",
+            epoch=iteration,
+            step=total_train_steps,
+        )
+        run.track(
+            actual_fraction,
+            name="teacher_anchor_fraction",
+            epoch=iteration,
+            step=total_train_steps,
+        )
 
     # Phase 4: Train
     dataset = TensorDataset(c_data, v_data, pi_data)
@@ -1332,8 +1356,9 @@ def train(config, paths, experiment_name, iteration, hist_size, run, total_train
                             num_workers=_dl_workers)
     del c_data, v_data, pi_data
 
+    parent_iteration = iteration if parent_iteration is None else parent_iteration
     nn = neural_net.NNWrapper.load_checkpoint(
-        Game, paths["checkpoint"], f"{iteration:04d}-{experiment_name}.pt"
+        Game, paths["checkpoint"], f"{parent_iteration:04d}-{experiment_name}.pt"
     )
     if lr is not None:
         nn.set_lr(lr)
@@ -2015,16 +2040,19 @@ class StreamingCompressedDataset(IterableDataset):
 @tracy_zone
 def self_play(config, paths, experiment_name, best, iteration, depth, fast_depth,
               variant_probs=None, fallback_checkpoint_dir=None):
-    import neural_net
-
     Game = config.Game
     bs = config.self_play_batch_size
     cb = Game.NUM_PLAYERS() * config.self_play_concurrent_batch_mult
-    n = bs * cb * config.self_play_chunks
+    n = games_per_iter(config)
     params = base_params(config, config.self_play_temp, bs, cb)
     params.games_to_play = n
     params.mcts_visits = [depth] * Game.NUM_PLAYERS()
     params.history_enabled = True
+    params.history_value_target = (
+        alphazero.HistoryValueTarget.ROOT
+        if config.value_target == "root"
+        else alphazero.HistoryValueTarget.FINAL
+    )
     params.epsilon = 0.25
     params.playout_cap_randomization = config.playout_cap_percent > 0.0
     params.playout_cap_depth = fast_depth
@@ -2044,7 +2072,7 @@ def self_play(config, paths, experiment_name, best, iteration, depth, fast_depth
     else:
         nn = _resolve_checkpoint(Game, paths["checkpoint"], experiment_name,
                                  best, fallback_checkpoint_dir)
-        prepare_inference_model(nn, config)
+        prepare_inference_model(nn, config, compile=config.torch_compile)
 
     players = [nn] * Game.NUM_PLAYERS()
     set_model_groups(params, players)
@@ -2068,14 +2096,16 @@ def self_play(config, paths, experiment_name, best, iteration, depth, fast_depth
     scores = pm.scores()
     win_rates = [0] * len(scores)
     sn = sum(scores)
-    for i in range(len(scores)):
-        win_rates[i] = scores[i] / sn
+    if sn > 0:
+        for i in range(len(scores)):
+            win_rates[i] = scores[i] / sn
     resign_scores = pm.resign_scores()
     resign_win_rates = [0] * len(resign_scores)
     rn = sum(resign_scores)
-    for i in range(len(resign_scores)):
-        resign_win_rates[i] = resign_scores[i] / rn
-    resign_rate = rn / sn
+    if rn > 0:
+        for i in range(len(resign_scores)):
+            resign_win_rates[i] = resign_scores[i] / rn
+    resign_rate = rn / sn if sn > 0 else 0
     hits = pm.cache_hits()
     misses = pm.cache_misses()
     total = hits + misses
@@ -2164,6 +2194,9 @@ def _resolve_checkpoint(Game, primary_dir, experiment_name, iteration, fallback_
     primary_path = os.path.join(primary_dir, f"{iteration:04d}-{experiment_name}.pt")
     if os.path.exists(primary_path):
         return neural_net.NNWrapper.load_checkpoint(Game, primary_dir, f"{iteration:04d}-{experiment_name}.pt")
+    cps = glob.glob(os.path.join(primary_dir, f"{iteration:04d}-*.pt"))
+    if cps:
+        return neural_net.NNWrapper.load_checkpoint(Game, "", cps[0])
     if fallback_dir:
         fallback_path = os.path.join(fallback_dir, f"{iteration:04d}-{experiment_name}.pt")
         if os.path.exists(fallback_path):
@@ -2173,6 +2206,230 @@ def _resolve_checkpoint(Game, primary_dir, experiment_name, iteration, fallback_
             return neural_net.NNWrapper.load_checkpoint(Game, "", cps[0])
     raise FileNotFoundError(f"Checkpoint {iteration:04d} not found in {primary_dir}" +
                            (f" or {fallback_dir}" if fallback_dir else ""))
+
+
+def _raw_policy_action(policy, valid_moves, temperature, rng):
+    """Choose a legal action directly from policy probabilities, with no MCTS."""
+    probs = np.asarray(policy, dtype=np.float64).reshape(-1)
+    valid = np.asarray(valid_moves, dtype=bool).reshape(-1)
+    if probs.shape[0] != valid.shape[0]:
+        raise ValueError(
+            f"policy/valid size mismatch: {probs.shape[0]} vs {valid.shape[0]}"
+        )
+    legal = np.flatnonzero(valid)
+    if legal.size == 0:
+        raise ValueError("cannot choose a raw-policy action with no legal moves")
+    masked = np.where(valid, probs, 0.0)
+    masked = np.nan_to_num(masked, nan=0.0, posinf=0.0, neginf=0.0)
+    masked = np.maximum(masked, 0.0)
+    if temperature <= 0.0:
+        legal_scores = masked[legal]
+        if np.any(legal_scores > 0.0):
+            return int(legal[int(np.argmax(legal_scores))])
+        return int(legal[0])
+    if masked.sum() <= 0.0:
+        weights = np.ones(legal.size, dtype=np.float64) / legal.size
+    else:
+        # Temperature on already-normalized policy probabilities. This is
+        # intentionally raw-policy sampling: no search values or visit counts.
+        legal_scores = np.power(masked[legal], 1.0 / temperature)
+        total = legal_scores.sum()
+        weights = (
+            legal_scores / total
+            if total > 0.0 and np.isfinite(total)
+            else np.ones(legal.size, dtype=np.float64) / legal.size
+        )
+    return int(rng.choice(legal, p=weights))
+
+
+def _raw_policy_process(agent, canonical):
+    batch = torch.from_numpy(np.asarray(canonical, dtype=np.float32)).unsqueeze(0)
+    if hasattr(agent, "process"):
+        _, pi = agent.process(batch)
+    else:
+        _, pi = agent.predict(batch)
+    if hasattr(pi, "detach"):
+        pi = pi.detach().cpu().numpy()
+    return np.asarray(pi, dtype=np.float64)[0]
+
+
+def selfplay_parent_iteration(config, iteration, current_best):
+    """Choose the checkpoint that generates this iteration's self-play."""
+    if bool(getattr(config, "selfplay_use_latest", False)):
+        return int(iteration)
+    return int(current_best)
+
+
+def update_uttt_ai_champion(state, iteration, win_rate, draw_rate):
+    """Update external champion state from a raw-policy UTTT.ai result."""
+    score = float(win_rate) + 0.5 * float(draw_rate)
+    previous = float(state.get("score", float("-inf")))
+    improved = score > previous
+    if improved:
+        state = {
+            "iteration": int(iteration),
+            "score": score,
+            "win_rate": float(win_rate),
+            "draw_rate": float(draw_rate),
+        }
+    return state, improved
+
+
+@tracy_zone
+def play_raw_policy_match(Game, players, games, temperature=0.0, seed=0,
+                          opening_plies=0):
+    """Play raw policy-head games with alternating seats.
+
+    Returns ``(player0_win_rate, draw_rate, avg_game_length)`` where player0 is
+    ``players[0]`` in the supplied list. The game is played without MCTS.
+    ``opening_plies`` random legal moves are applied before policy play to avoid
+    replaying the same two deterministic games when temperature is zero.
+    """
+    if Game.NUM_PLAYERS() != 2:
+        raise ValueError("raw external benchmark currently supports two-player games only")
+    rng = np.random.default_rng(seed)
+    wins = [0, 0]
+    draws = 0
+    total_moves = 0
+    for game_idx in range(games):
+        seat_agents = [players[game_idx % 2], players[(game_idx + 1) % 2]]
+        seat_to_player = [game_idx % 2, (game_idx + 1) % 2]
+        gs = Game()
+        moves = 0
+        for _ in range(opening_plies):
+            if gs.scores() is not None:
+                break
+            valid = np.asarray(gs.valid_moves())
+            legal = np.flatnonzero(valid)
+            if len(legal) == 0:
+                break
+            gs.play_move(int(rng.choice(legal)))
+            moves += 1
+        while gs.scores() is None:
+            seat = gs.current_player()
+            policy = _raw_policy_process(seat_agents[seat], gs.canonicalized())
+            action = _raw_policy_action(policy, gs.valid_moves(), temperature, rng)
+            gs.play_move(action)
+            moves += 1
+        scores = np.asarray(gs.scores(), dtype=np.float64)
+        total_moves += moves
+        if scores[-1] > 0:
+            draws += 1
+        else:
+            winner_seat = int(np.argmax(scores[:2]))
+            wins[seat_to_player[winner_seat]] += 1
+    denom = max(1, games)
+    return wins[0] / denom, draws / denom, total_moves / denom
+
+
+_UTTT_AI_EVAL_WARNED = False
+
+
+def maybe_eval_uttt_ai(config, paths, experiment_name, iteration, run, total_train_steps):
+    """Track raw-policy W/D rates versus the cached uttt.ai model if enabled."""
+    global _UTTT_AI_EVAL_WARNED
+    interval = int(getattr(config, "uttt_ai_eval_interval", 0))
+    if interval <= 0 or config.game != "uttt" or iteration <= 0 or iteration % interval != 0:
+        return None
+    try:
+        _ensure_project_root_importable()
+        import neural_net
+        from tools.uttt_ai_adapter import UtttAiPolicyValueNet, default_model_path
+
+        model_path = getattr(config, "uttt_ai_eval_model", "") or default_model_path()
+        if not os.path.exists(model_path):
+            if not _UTTT_AI_EVAL_WARNED:
+                tqdm.tqdm.write(
+                    f"Skipping UTTT.ai eval: cached model not found at {model_path}"
+                )
+                _UTTT_AI_EVAL_WARNED = True
+            return None
+        nn = neural_net.NNWrapper.load_checkpoint(
+            config.Game, paths["checkpoint"], f"{iteration:04d}-{experiment_name}.pt"
+        )
+        prepare_inference_model(nn, config)
+        uttt_ai = UtttAiPolicyValueNet(
+            model_path,
+            require_cuda=bool(getattr(config, "uttt_ai_eval_require_cuda", False)),
+        )
+        games = int(getattr(config, "uttt_ai_eval_games", 16))
+        temp = float(getattr(config, "uttt_ai_eval_temperature", 0.0))
+        opening_plies = int(getattr(config, "uttt_ai_eval_opening_plies", 0))
+        opening_seed = int(getattr(config, "uttt_ai_eval_opening_seed", -1))
+        eval_seed = iteration if opening_seed < 0 else opening_seed
+        win_rate, draw_rate, avg_len = play_raw_policy_match(
+            config.Game, [nn, uttt_ai], games, temperature=temp, seed=eval_seed,
+            opening_plies=opening_plies
+        )
+        csv_path = os.path.join(paths["experiment"], "uttt_ai_eval.csv")
+        needs_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+        if not needs_header:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                header = f.readline()
+                rest = f.read()
+            if "opening_plies" not in header or "opening_seed" not in header:
+                with open(csv_path, "w", encoding="utf-8") as f:
+                    fields = header.rstrip("\n").split(",")
+                    if "opening_plies" not in fields:
+                        fields.append("opening_plies")
+                    if "opening_seed" not in fields:
+                        fields.append("opening_seed")
+                    f.write(",".join(fields) + "\n")
+                    for line in rest.splitlines():
+                        existing = line.split(",")
+                        while len(existing) < len(fields):
+                            existing.append("")
+                        f.write(",".join(existing[:len(fields)]) + "\n")
+        with open(csv_path, "a", encoding="utf-8") as f:
+            if needs_header:
+                f.write(
+                    "iteration,win_rate,draw_rate,average_game_length,games,"
+                    "total_train_steps,timestamp,opening_plies,opening_seed\n"
+                )
+            f.write(
+                f"{iteration},{win_rate:.10g},{draw_rate:.10g},{avg_len:.10g},"
+                f"{games},{total_train_steps},{time.time():.6f},"
+                f"{opening_plies},{eval_seed}\n"
+            )
+        run.track(
+            win_rate, name="win_rate", epoch=iteration, step=total_train_steps,
+            context={"vs": "uttt.ai", "search": "raw_policy", "from": "all_games"}
+        )
+        run.track(
+            win_rate, name="uttt_ai_win_rate", epoch=iteration, step=total_train_steps,
+            context={"search": "raw_policy", "from": "all_games"}
+        )
+        run.track(
+            draw_rate, name="draw_rate", epoch=iteration, step=total_train_steps,
+            context={"vs": "uttt.ai", "search": "raw_policy", "from": "all_games"}
+        )
+        run.track(
+            draw_rate, name="uttt_ai_draw_rate", epoch=iteration, step=total_train_steps,
+            context={"search": "raw_policy", "from": "all_games"}
+        )
+        run.track(
+            win_rate + 0.5 * draw_rate, name="uttt_ai_score",
+            epoch=iteration, step=total_train_steps,
+            context={"search": "raw_policy"}
+        )
+        run.track(
+            avg_len, name="average_game_length", epoch=iteration, step=total_train_steps,
+            context={"vs": "uttt.ai", "search": "raw_policy"}
+        )
+        run.track(
+            avg_len, name="uttt_ai_average_game_length", epoch=iteration,
+            step=total_train_steps, context={"search": "raw_policy"}
+        )
+        tqdm.tqdm.write(
+            f"UTTT.ai raw eval [iter {iteration}]: "
+            f"wr={_fmt_pct(win_rate)} draw={_fmt_pct(draw_rate)} "
+            f"avg_len={avg_len:.1f} games={games} opening={opening_plies} "
+            f"seed={eval_seed}"
+        )
+        return win_rate, draw_rate, avg_len
+    except Exception as exc:
+        tqdm.tqdm.write(f"Skipping UTTT.ai eval at iter {iteration}: {exc}")
+        return None
 
 
 @tracy_zone
@@ -2185,6 +2442,7 @@ def play_past(config, paths, experiment_name, depth, iteration, past_iter, batch
     nn = neural_net.NNWrapper.load_checkpoint(
         Game, paths["checkpoint"], f"{iteration:04d}-{experiment_name}.pt"
     )
+    # Compare/pitting runs are more stable without torch.compile's capture path.
     prepare_inference_model(nn, config)
     if past_iter == 0:
         nn_past = RandPlayer()
@@ -2348,6 +2606,41 @@ def get_lr(config, iteration, lr_state):
             lr_state['num_drops'] += 1
             lr_state['last_drop_iter'] = iteration
             lr_state['current_lr'] = lr
+    elif config.lr_schedule == "cosine":
+        cosine_start = (
+            config.lr_cosine_start_iter
+            if config.lr_cosine_start_iter >= 0
+            else max(0, config.lr_warmup_target)
+        )
+        cosine_end = (
+            config.lr_cosine_end_iter
+            if config.lr_cosine_end_iter >= 0
+            else config.iterations - 1
+        )
+        cosine_length = max(1, cosine_end - cosine_start)
+        progress = min(1.0, max(0.0, (iteration - cosine_start) / cosine_length))
+        cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+        lr = config.lr * (
+            config.lr_cosine_min_factor
+            + (1.0 - config.lr_cosine_min_factor) * cosine_factor
+        )
+    elif config.lr_schedule == "exponential":
+        exponential_start = (
+            config.lr_exponential_start_iter
+            if config.lr_exponential_start_iter >= 0
+            else max(0, config.lr_warmup_target)
+        )
+        exponential_end = (
+            config.lr_exponential_end_iter
+            if config.lr_exponential_end_iter >= 0
+            else config.iterations - 1
+        )
+        exponential_length = max(1, exponential_end - exponential_start)
+        progress = min(
+            1.0,
+            max(0.0, (iteration - exponential_start) / exponential_length),
+        )
+        lr = config.lr * config.lr_exponential_final_factor ** progress
     else:
         raise ValueError(f"Unknown lr_schedule: {config.lr_schedule}")
 
@@ -2479,107 +2772,6 @@ def _bootstrap_retrain(nn, reservoir_files, window_files, config, run, source_n,
     return total_train_steps
 
 
-def _analyze_iteration_variants(config, paths, experiment_name, iteration):
-    """Compute per-variant pi-loss, v-loss, and target entropy after training.
-
-    Loads up to 4096 samples from the current iteration's history files, runs
-    inference with the newly-trained checkpoint, and returns per-variant mean losses.
-
-    Returns dict: {variant_name: {"pi_loss": float, "v_loss": float, "entropy": float}}
-    Returns {} for non-unified games or if history files are missing.
-    """
-    import neural_net
-
-    Game = config.Game
-    hist_location = paths["history"]
-
-    file_triples = glob_file_triples(hist_location, f"{iteration:04d}-*-canonical-*.ptz")
-    if not file_triples:
-        return {}
-
-    MAX_SAMPLES = 32_000
-    all_c, all_v, all_pi = [], [], []
-    total = 0
-    per_file = max(1, MAX_SAMPLES // len(file_triples))
-    for c_path, v_path, pi_path, size in file_triples:
-        take = min(per_file, size, MAX_SAMPLES - total)
-        if take <= 0:
-            continue
-        c = load_compressed(c_path).float()
-        v = load_compressed(v_path).float()
-        pi = load_compressed(pi_path).float()
-        if take < size:
-            idx = torch.randperm(size)[:take]
-            all_c.append(c[idx]); all_v.append(v[idx]); all_pi.append(pi[idx])
-        else:
-            all_c.append(c); all_v.append(v); all_pi.append(pi)
-        total += take
-
-    if not all_c:
-        return {}
-
-    c_data = torch.cat(all_c)
-    v_data = torch.cat(all_v)
-    pi_data = torch.cat(all_pi)
-    del all_c, all_v, all_pi
-
-    # Variant membership: channels 32-35 one-hot, sampled at center of 13×13 grid
-    variant_ids = c_data[:, 32:36, 6, 6].argmax(dim=1).numpy()
-
-    try:
-        nn = neural_net.NNWrapper.load_checkpoint(
-            Game, paths["checkpoint"], f"{iteration + 1:04d}-{experiment_name}.pt"
-        )
-    except Exception:
-        del c_data, v_data, pi_data
-        return {}
-
-    device = nn.device
-    nn.nnet.eval()
-
-    all_pi_loss, all_v_loss, all_entropy, all_top1, all_v_pred, all_v_actual = [], [], [], [], [], []
-    bs = config.train_batch_size
-    n_samples = len(c_data)
-    with torch.no_grad():
-        for start in tqdm.tqdm(range(0, n_samples, bs), desc="Variant analysis", leave=False):
-            end = min(start + bs, n_samples)
-            cb = c_data[start:end].to(device, non_blocking=True)
-            vb = v_data[start:end].to(device, non_blocking=True)
-            pib = pi_data[start:end].to(device, non_blocking=True)
-            out_v, out_pi = nn.nnet(cb)
-            all_pi_loss.append(nn.sample_loss_pi(pib, out_pi).cpu().numpy())
-            all_v_loss.append(nn.sample_loss_v(vb, out_v).cpu().numpy())
-            all_entropy.append((-(pib * (pib + 1e-9).log()).sum(dim=1)).cpu().numpy())
-            all_top1.append(pib.max(dim=1).values.cpu().numpy())
-            # Value calibration: predicted vs actual current-player win prob (index 0)
-            all_v_pred.append(torch.exp(out_v)[:, 0].cpu().numpy())
-            all_v_actual.append(vb[:, 0].cpu().numpy())
-
-    pi_losses  = np.concatenate(all_pi_loss)
-    v_losses   = np.concatenate(all_v_loss)
-    entropies  = np.concatenate(all_entropy)
-    top1       = np.concatenate(all_top1)
-    v_pred     = np.concatenate(all_v_pred)
-    v_actual   = np.concatenate(all_v_actual)
-    del nn, c_data, v_data, pi_data
-    gc.collect()
-
-    result = {}
-    for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-        mask = variant_ids == vid
-        if mask.sum() == 0:
-            continue
-        result[vname] = {
-            "pi_loss":  pi_losses[mask],
-            "v_loss":   v_losses[mask],
-            "entropy":  entropies[mask],
-            "top1":     top1[mask],
-            "v_pred":   v_pred[mask],
-            "v_actual": v_actual[mask],
-        }
-    return result
-
-
 def _log_win_rate_matrix(paths, iteration, run, total_train_steps):
     """Log win rate matrix heatmap to aim. Works for any game."""
     try:
@@ -2628,718 +2820,37 @@ def _log_win_rate_matrix(paths, iteration, run, total_train_steps):
         plt.close("all")
 
 
-def _generate_visualizations(config, paths, iteration, run, total_train_steps, variant_stats=None):
-    """Generate and log phase-aware action heatmap and win rate matrix as aim images.
-
-    Only called for unified games. All errors are caught silently so a missing
-    dependency or bad data never interrupts training.
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import aim as aim_lib
-    except ImportError:
-        return
-
-    try:
-        hist_location = paths["history"]
-        file_triples = glob_file_triples(hist_location, f"{iteration:04d}-*-canonical-*.ptz")
-        if not file_triples:
-            return
-
-        MAX_SAMPLES = 32_000
-        all_c, all_pi = [], []
-        total = 0
-        per_file = max(1, MAX_SAMPLES // len(file_triples))
-        for c_path, v_path, pi_path, size in file_triples:
-            take = min(per_file, size, MAX_SAMPLES - total)
-            if take <= 0:
-                continue
-            c = load_compressed(c_path).float()
-            pi = load_compressed(pi_path).float()
-            if take < size:
-                idx = torch.randperm(size)[:take]
-                all_c.append(c[idx]); all_pi.append(pi[idx])
-            else:
-                all_c.append(c); all_pi.append(pi)
-            total += take
-
-        if not all_c:
-            return
-
-        c_data = torch.cat(all_c)
-        pi_np = torch.cat(all_pi).numpy()
-        del all_c, all_pi
-
-        # Variant id per sample: channels 32-35 one-hot at grid center (6,6)
-        variant_ids = c_data[:, 32:36, 6, 6].numpy().argmax(axis=1)
-
-        # Unit presence (channels 1-8 summed over board)
-        unit_presence_sum = c_data[:, 1:9, :, :].sum(dim=(1, 2, 3)).numpy()
-
-        # Four monotonic phases using two independently-decreasing signals:
-        #   reserves (ch 24-29): only decrease as units deploy
-        #   portal HP (ch 30-31): only decrease as damage lands
-        #   unit count: only decreases after deploy is done (no new units enter)
-        #
-        # Phase 1 — Deploy:      reserves above per-variant median
-        # Phase 2 — Standstill:  fleet committed, portals intact, unit count high
-        # Phase 3 — Attrition:   unit count declining, portals still intact
-        #                        (game often decided here before portal is touched)
-        # Phase 4 — Portal:      any portal damage (prioritized over phases 2-3)
-        #
-        # Portal damage is checked first so it always "wins" regardless of unit count.
-        # Within portal-intact states, per-variant median unit count splits standstill/attrition.
-        reserves = c_data[:, 24:30, 6, 6].sum(dim=1).numpy()
-        portal_total = c_data[:, 30:32, 6, 6].sum(dim=1).numpy()
-
-        deploy_mask  = np.zeros(len(variant_ids), dtype=bool)
-        for _vid in range(4):
-            _vm = variant_ids == _vid
-            if _vm.sum() > 0:
-                deploy_mask[_vm] = reserves[_vm] > float(np.median(reserves[_vm]))
-
-        post_deploy    = ~deploy_mask
-        portal_mask    = post_deploy & (portal_total <= 1.99)
-        intact_mask    = post_deploy & (portal_total >  1.99)
-        standstill_mask = np.zeros(len(variant_ids), dtype=bool)
-        attrition_mask  = np.zeros(len(variant_ids), dtype=bool)
-        for _vid in range(4):
-            _vm = intact_mask & (variant_ids == _vid)
-            if _vm.sum() > 1:
-                _med = float(np.median(unit_presence_sum[_vm]))
-                standstill_mask |= _vm & (unit_presence_sum >  _med)
-                attrition_mask  |= _vm & (unit_presence_sum <= _med)
-            elif _vm.sum() == 1:
-                standstill_mask |= _vm
-
-        # Per-unit-type presence at each hex: channels 1=Fighter, 2=Cruiser, 3=Dreadnought
-        unit_presence = [c_data[:, ch, :, :].numpy() > 0.5 for ch in [1, 2, 3]]
-
-        # Valid spatial action slots per unit type (10 slots, 0..9).
-        # Fighter: move f/fl/fr (0,1,2), fire forward (5)
-        # Cruiser: move f/fl/fr/l/r (0..4), fire f/fl/fr (5,6,7)
-        # Dreadnought: move fl/fr/l/r (1..4), fire fl/fr/rl/rr (6..9)
-        VALID_SLOTS_BY_UNIT = np.zeros((3, 10), dtype=bool)
-        VALID_SLOTS_BY_UNIT[0, [0, 1, 2, 5]]             = True
-        VALID_SLOTS_BY_UNIT[1, [0, 1, 2, 3, 4, 5, 6, 7]] = True
-        VALID_SLOTS_BY_UNIT[2, [1, 2, 3, 4, 6, 7, 8, 9]] = True
-
-        # Valid deploy facings in canonical (current-player == P0) perspective.
-        VALID_DEPLOY_FACINGS = np.zeros((3, 6), dtype=bool)
-        VALID_DEPLOY_FACINGS[0, [1, 2, 3]]    = True   # Fighter:     NE, NW, W
-        VALID_DEPLOY_FACINGS[1, [1, 2, 3]]    = True   # Cruiser:     NE, NW, W
-        VALID_DEPLOY_FACINGS[2, [0, 1, 2, 3]] = True   # Dreadnought: E, NE, NW, W
-
-        # Which variants each unit type can exist in (Skirmish has no Dread,
-        # Showdown has no Cruiser). Used by fig4/5/6 to grey out N/A cells.
-        UNIT_VALID_IN_VARIANT = np.array([
-            [True,  True,  True,  True ],   # Fighter
-            [True,  False, True,  True ],   # Cruiser
-            [False, True,  True,  True ],   # Dreadnought
-        ], dtype=bool)
-
-        # Inner board_side per variant id (variants 0-2 use 5; Battle uses 6).
-        # Drives deploy-hex annotations on per-variant heatmaps.
-        VARIANT_BOARD_SIDE = [5, 5, 5, 6]
-
-        # Minimum sample count below which a renormalized distribution is too
-        # noisy to plot; we render an "insufficient data" placeholder instead.
-        MIN_SAMPLES_FOR_PLOT = 50
-
-        # Per-sample unit counts by type (my + opponent).
-        # Fighter=1 hex, Cruiser=2 hexes, Dreadnought=3 hexes — divide channel sum by hex size.
-        _hex_sizes = [1, 2, 3]
-        unit_counts_my  = [c_data[:, ch,   :, :].sum(dim=(1, 2)).numpy() / sz
-                           for ch, sz in zip([1, 2, 3], _hex_sizes)]
-        unit_counts_opp = [c_data[:, ch+4, :, :].sum(dim=(1, 2)).numpy() / sz
-                           for ch, sz in zip([1, 2, 3], _hex_sizes)]
-
-        del c_data
-
-        # Precompute spatial pi tensor once: (N, 13, 13, 10)
-        pi_spatial = pi_np[:, :1690].reshape(-1, 13, 13, 10)
-
-        # Hex valid-cell mask for the 13×13 unified board (board_side=6)
-        hex_mask = np.zeros((13, 13), dtype=bool)
-        for r in range(13):
-            for c in range(13):
-                q = r - 6; rh = c - 6; s = -q - rh
-                if abs(q) <= 6 and abs(rh) <= 6 and abs(s) <= 6:
-                    hex_mask[r, c] = True
-
-        # Slots 0-4 are movement (MvFwd/MvFL/MvFR/RotL/RotR), 5-9 are firing.
-        MOVE_KIND_MASK = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=bool)
-        FIRE_KIND_MASK = ~MOVE_KIND_MASK
-        ALL_KIND_MASK  = np.ones(10, dtype=bool)
-        _KIND_MASKS = {"all": ALL_KIND_MASK, "move": MOVE_KIND_MASK, "fire": FIRE_KIND_MASK}
-
-        def _spatial_heatmap(sample_mask, unit_idx=None, action_kind="all"):
-            """(13,13) heatmap of π mass per unit-instance at each source hex.
-
-            Mass is restricted to (hex, slot) pairs whose slot is type-legal
-            for a unit type present at that hex. action_kind in
-            {"all","move","fire"} further restricts which slots contribute.
-
-            The grid is normalized by total unit-instance count of the
-            relevant type(s) across the samples — so attrition (fewer units
-            alive in later phases) doesn't artificially shrink the heatmap;
-            you see "what each remaining unit does," not "how many units
-            there are doing it."
-
-            Returns (grid, mass_per_unit):
-              grid[r,c]      = avg π mass at hex (r,c) per unit-instance,
-                               NaN outside the hex hull. Cross-panel
-                               comparable.
-              mass_per_unit  = total π mass per unit-instance for this
-                               unit/kind selection. Equal to nansum(grid).
-            """
-            n = int(sample_mask.sum())
-            if n == 0:
-                return np.full((13, 13), np.nan), 0.0
-            sp = pi_spatial[sample_mask]                              # (n, 13, 13, 10)
-            grid = np.zeros((13, 13))
-            units = [unit_idx] if unit_idx is not None else [0, 1, 2]
-            kind_mask = _KIND_MASKS[action_kind]
-            denom = 0.0
-            for u in units:
-                up = unit_presence[u][sample_mask]                    # (n, 13, 13)
-                slot_mask = VALID_SLOTS_BY_UNIT[u] & kind_mask        # (10,)
-                grid += (sp * up[:, :, :, np.newaxis] * slot_mask
-                         ).sum(axis=(0, 3))                           # (13, 13)
-                denom += float(unit_counts_my[u][sample_mask].sum())
-            if denom <= 0:
-                return np.full((13, 13), np.nan), 0.0
-            grid = grid / denom
-            mass_per_unit = float(grid.sum())
-            return np.where(hex_mask, grid, np.nan), mass_per_unit
-
-        def _action_dist(sample_mask, unit_idx):
-            """Per-slot policy mass for a unit type, with per-unit magnitude.
-
-            Returns (dist10, mass_per_unit):
-              dist10        sums to 1 across the 10 slots (renormalized
-                            over type-legal slots) — "of this unit type's
-                            action mass in these samples, what share goes
-                            to each slot".
-              mass_per_unit = Σπ on this unit type's type-legal slots
-                            divided by total unit-instance count of this
-                            type across the samples — cross-cell magnitude
-                            that is NOT confounded by unit attrition.
-            """
-            n = int(sample_mask.sum())
-            if n == 0:
-                return np.zeros(10), 0.0
-            sp = pi_spatial[sample_mask]                              # (n, 13, 13, 10)
-            up = unit_presence[unit_idx][sample_mask]                 # (n, 13, 13)
-            slot_mask = VALID_SLOTS_BY_UNIT[unit_idx]                 # (10,)
-            dist = (sp * up[:, :, :, np.newaxis] * slot_mask
-                    ).sum(axis=(0, 1, 2))                             # (10,)
-            total = float(dist.sum())
-            denom = float(unit_counts_my[unit_idx][sample_mask].sum())
-            mass_per_unit = (total / denom) if denom > 0 else 0.0
-            return (dist / total if total > 0 else dist), mass_per_unit
-
-        def _draw_na(ax, label="N/A"):
-            """Render a grey 'N/A' / insufficient-data placeholder panel."""
-            ax.set_facecolor("#dddddd")
-            ax.text(0.5, 0.5, label, transform=ax.transAxes,
-                    ha="center", va="center", fontsize=10, color="#888888")
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-        # ---- Hex-canvas rendering ---------------------------------------------------
-        # The 13×13 grid is indexed [q+6, r+6]. The game's actual hex layout
-        # (matching StarGambitGS::dump and play.py) places P0 deploy at the
-        # bottom-right corner and P1 deploy at the top-left. We render heatmaps
-        # using axial→pixel coords so peaks land at the corners a player expects.
-        from matplotlib.collections import PolyCollection
-
-        _HEX_DY = math.sqrt(3) / 2
-        _hex_unit_verts = np.array([
-            (math.cos(math.radians(60 * k + 30)),
-             math.sin(math.radians(60 * k + 30)))
-            for k in range(6)
-        ])  # pointy-top hexagon, circumradius=1
-
-        def _axial_to_xy(q, r):
-            """Axial (q, r) → screen (x, y) for pointy-top hexes, +y points down."""
-            x = q + r * 0.5
-            y = r * _HEX_DY
-            return x, y
-
-        def _hex_in_bounds(q, r, side=6):
-            return abs(q) <= side and abs(r) <= side and abs(-q - r) <= side
-
-        def _draw_hex_heatmap(ax, grid, cmap="YlOrRd", vmin=0, vmax=None,
-                              board_side_hint=None, show_colorbar=True,
-                              show_compass=True):
-            """Render a 13×13 grid (indexed [q+6, r+6]) as a hex polygon collection.
-
-            board_side_hint: int marks the P0 deploy hex for that inner board
-                size AND clips the rendered hexes to that variant's board
-                (so the outer empty ring is hidden for board_side=5 variants).
-                None renders all hexes within the unified board_side=6 hull
-                and marks both 5- and 6-side spawn hexes.
-            """
-            side = board_side_hint if board_side_hint is not None else 6
-            polys = []
-            values = []
-            for q in range(-side, side + 1):
-                for r in range(-side, side + 1):
-                    if not _hex_in_bounds(q, r, side):
-                        continue
-                    val = grid[q + 6, r + 6]
-                    if np.isnan(val):
-                        continue
-                    cx, cy = _axial_to_xy(q, r)
-                    polys.append(_hex_unit_verts * 0.95 + (cx, cy))
-                    values.append(val)
-            if not polys:
-                _draw_na(ax)
-                return None
-            if vmax is None:
-                vmax = max(values) if values else 1.0
-            if vmax <= 0:
-                vmax = 1.0
-            coll = PolyCollection(polys, array=np.asarray(values),
-                                  cmap=cmap, edgecolors="white", linewidths=0.3)
-            coll.set_clim(vmin, vmax)
-            ax.add_collection(coll)
-
-            # Spawn markers.
-            spawn_sides = [board_side_hint] if board_side_hint is not None else [5, 6]
-            for s in spawn_sides:
-                cx, cy = _axial_to_xy(0, s)
-                ax.plot(cx, cy, marker="x", markersize=8, mew=1.5,
-                        color="#222222", linestyle="none")
-            # Axis cosmetics: equal aspect, +y down, no ticks; small compass.
-            x_min = -side - 0.5 * side - 1
-            x_max =  side + 0.5 * side + 1
-            y_min = -side * _HEX_DY - 1
-            y_max =  side * _HEX_DY + 1
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_max, y_min)  # invert y so +y is down (matches dump())
-            ax.set_aspect("equal")
-            ax.set_xticks([]); ax.set_yticks([])
-            if show_compass:
-                ax.text(x_max - 0.4, 0, "E", ha="right", va="center",
-                        fontsize=7, color="#888888")
-                ax.text(x_min + 0.4, 0, "W", ha="left",  va="center",
-                        fontsize=7, color="#888888")
-                ax.text(0, y_min + 0.4, "↑P1", ha="center", va="top",
-                        fontsize=7, color="#888888")
-                ax.text(0, y_max - 0.4, "P0↓", ha="center", va="bottom",
-                        fontsize=7, color="#888888")
-            if show_colorbar:
-                import matplotlib.pyplot as _plt
-                _plt.colorbar(coll, ax=ax, fraction=0.046, pad=0.04)
-            return coll
-
-        unit_names  = ["Fighter", "Cruiser", "Dreadnought"]
-        unit_colors = ["#4e79a7", "#f28e2b", "#59a14f"]
-        facing_labels = ["E", "NE", "NW", "W", "SW", "SE"]
-        action_labels = ["MvFwd", "MvFL", "MvFR", "RotL", "RotR",
-                         "FirFwd", "FirFL", "FirFR", "FirRL", "FirRR"]
-        # Blue=move, orange=rotate, red=fire
-        action_colors = ["#4e79a7","#5fa2ce","#a0cbe8",
-                         "#f28e2b","#ffbe7d",
-                         "#e15759","#ff9d9a","#b07aa1","#9c755f","#d37295"]
-
-        # --- Figure 1: aggregate action frequency by phase ---
-        fig1, axes = plt.subplots(1, 4, figsize=(20, 5))
-        fig1.suptitle(f"Iteration {iteration} — Action Frequency by Phase", fontsize=12)
-
-        from matplotlib.patches import Patch as _Patch
-
-        # --- Figure 1 (per-variant): each row is a variant. Columns are
-        # Deploy bars + (Move, Fire) heatmaps for each of 3 phases = 7 cols.
-        # Variants 0-2 use board_side=5 so the outer ring of hexes is hidden.
-        # Heatmap values are π mass per unit-instance; vmax is shared across
-        # all 6 phase heatmaps within a variant row so cross-phase magnitude
-        # is visible at a glance (rare-action panels look dim, common-action
-        # panels look bright). Variant rows have independent scales.
-        fig1, axes = plt.subplots(4, 7, figsize=(34, 20))
-        fig1.suptitle(
-            f"Iteration {iteration} — Action Frequency by Variant × Phase "
-            "(π mass per unit-instance; Move slots 0-4 vs Fire slots 5-9; "
-            "vmax shared per variant row)",
-            fontsize=13)
-        deploy_valid_mask = np.concatenate(
-            [VALID_DEPLOY_FACINGS[ui] for ui in range(3)]).astype(bool)  # (18,)
-        phase_specs = [
-            ("Standstill / Maneuver",       standstill_mask),
-            ("Attrition (no portal dmg)",   attrition_mask),
-            ("Portal Damage",               portal_mask),
-        ]
-
-        # Pass 1: pre-compute every spatial panel so we can share vmax per row.
-        spatial_cache = {}  # (vid, phase_idx, kind) -> (grid_or_None, mass, n)
-        for vid in range(len(UNIFIED_VARIANT_NAMES)):
-            vmask_v = variant_ids == vid
-            for phase_idx, (_, pmask) in enumerate(phase_specs):
-                combo = pmask & vmask_v
-                n_combo = int(combo.sum())
-                for kind in ("move", "fire"):
-                    if n_combo < MIN_SAMPLES_FOR_PLOT:
-                        spatial_cache[(vid, phase_idx, kind)] = (None, 0.0, n_combo)
-                    else:
-                        grid, mass = _spatial_heatmap(combo, action_kind=kind)
-                        spatial_cache[(vid, phase_idx, kind)] = (grid, mass, n_combo)
-
-        # Per-variant-row vmax (None falls back to per-panel auto in renderer)
-        row_vmax = {}
-        for vid in range(len(UNIFIED_VARIANT_NAMES)):
-            peaks = []
-            for phase_idx in range(len(phase_specs)):
-                for kind in ("move", "fire"):
-                    grid, _, _ = spatial_cache[(vid, phase_idx, kind)]
-                    if grid is None or np.all(np.isnan(grid)):
-                        continue
-                    m = np.nanmax(grid)
-                    if np.isfinite(m):
-                        peaks.append(m)
-            row_vmax[vid] = max(peaks) if peaks else None
-
-        for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-            vmask = variant_ids == vid
-            side = VARIANT_BOARD_SIDE[vid]
-
-            # ---- Deploy bars for this variant (col 0) ----
-            ax = axes[vid, 0]
-            d_mask = deploy_mask & vmask
-            d_n = int(d_mask.sum())
-            if d_n >= MIN_SAMPLES_FOR_PLOT:
-                dep_pi = pi_np[d_mask, 1690:1708].sum(axis=0)
-                dep_pi = dep_pi * deploy_valid_mask
-                dep_total = dep_pi.sum()
-                if dep_total > 0:
-                    dep_pi = dep_pi / dep_total
-            else:
-                dep_pi = np.zeros(18)
-            x = np.arange(6); bar_w = 0.25
-            legend_handles = []
-            for ui, (uname, col) in enumerate(zip(unit_names, unit_colors)):
-                # Grey the bar if either the facing or the unit is invalid here.
-                unit_ok = UNIT_VALID_IN_VARIANT[ui, vid]
-                bar_colors = [col if (unit_ok and VALID_DEPLOY_FACINGS[ui, f])
-                              else "#dddddd" for f in range(6)]
-                ax.bar(x + ui * bar_w, dep_pi[ui * 6: ui * 6 + 6], bar_w,
-                       color=bar_colors, alpha=0.85)
-                legend_handles.append(_Patch(facecolor=col, alpha=0.85, label=uname))
-            ax.set_xticks(x + bar_w); ax.set_xticklabels(facing_labels, fontsize=8)
-            if d_n < MIN_SAMPLES_FOR_PLOT:
-                _draw_na(ax, label=f"n={d_n}\n(insufficient)")
-            ax.set_title(f"{vname.capitalize()} — Deploy\n(n={d_n})", fontsize=10)
-            ax.set_ylabel("Fraction of deploy pi mass\n(valid only)", fontsize=8)
-            ax.legend(handles=legend_handles, fontsize=7)
-
-            # ---- Spatial-phase heatmaps: (Move, Fire) per phase ----
-            vmax = row_vmax[vid]
-            for phase_idx, (title, _) in enumerate(phase_specs):
-                for kind_idx, kind in enumerate(("move", "fire")):
-                    col_idx = 1 + phase_idx * 2 + kind_idx
-                    ax = axes[vid, col_idx]
-                    grid, mass, n = spatial_cache[(vid, phase_idx, kind)]
-                    label = "Move" if kind == "move" else "Fire"
-                    if n < MIN_SAMPLES_FOR_PLOT or grid is None:
-                        _draw_na(ax, label=f"n={n}\n(insufficient)")
-                        ax.set_title(f"{vname.capitalize()} — {title}\n{label} (n={n})",
-                                     fontsize=9)
-                        continue
-                    _draw_hex_heatmap(ax, grid, board_side_hint=side, vmax=vmax)
-                    ax.set_title(
-                        f"{vname.capitalize()} — {title}\n"
-                        f"{label} (n={n}, Σπ/unit={mass:.3f})",
-                        fontsize=9)
-        plt.tight_layout()
-
-        fig2 = None
-
-        # --- Figure 3: per-unit action breakdown (3 units × 4 phases).
-        # Bars sum to 1 within each cell (slot share). Σπ/unit in the title
-        # is the cross-cell-comparable magnitude: total π mass for this
-        # unit type per unit-instance, so attrition doesn't bias it.
-        fig3, axes3 = plt.subplots(3, 4, figsize=(20, 12))
-        fig3.suptitle(f"Iteration {iteration} — Action Breakdown by Unit Type "
-                      "(type-legal slots only; Σπ/unit gives per-instance "
-                      "magnitude)", fontsize=13)
-        _phases = [(deploy_mask, "Deploy"), (standstill_mask, "Standstill"),
-                   (attrition_mask, "Attrition"), (portal_mask, "Portal")]
-        for ui, uname in enumerate(unit_names):
-            valid_slots = VALID_SLOTS_BY_UNIT[ui]
-            n_valid = int(valid_slots.sum())
-            for pi_col, (mask, phase) in enumerate(_phases):
-                ax = axes3[ui, pi_col]
-                n = int(mask.sum())
-                bar_colors = [action_colors[s] if valid_slots[s] else "#dddddd"
-                              for s in range(10)]
-                if n < MIN_SAMPLES_FOR_PLOT:
-                    _draw_na(ax, label=f"n={n}\n(insufficient)")
-                    ax.set_title(f"{uname} — {phase}\n(n={n})", fontsize=9)
-                    continue
-                dist, mass_per_unit = _action_dist(mask, ui)
-                ax.bar(range(10), dist, color=bar_colors, alpha=0.85)
-                ax.set_xticks(range(10))
-                ax.set_xticklabels(action_labels, fontsize=6, rotation=45, ha="right")
-                ax.set_title(
-                    f"{uname} — {phase}\n"
-                    f"(n={n}, valid:{n_valid}, Σπ/unit={mass_per_unit:.3f})",
-                    fontsize=9)
-                ax.set_ylabel("Fraction", fontsize=8)
-        plt.tight_layout()
-
-        # --- Figure 4: per-unit × per-variant spatial heatmaps (all positions).
-        # 3 rows (units) × 8 cols ((variant, kind) pairs). vmax is shared
-        # within each (unit, variant) pair so move/fire are directly
-        # comparable; pairs across variants/units are NOT scale-coupled.
-        fig4, axes4 = plt.subplots(3, 8, figsize=(28, 12))
-        fig4.suptitle(
-            f"Iteration {iteration} — Unit × Variant Action Heatmaps "
-            "(All Positions; π mass per unit-instance; "
-            "vmax shared per (unit, variant) pair)",
-            fontsize=13)
-        for ui, uname in enumerate(unit_names):
-            for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                vmask = variant_ids == vid
-                n = int(vmask.sum())
-                # Compute both kinds first so the (move, fire) pair can share vmax.
-                kind_data = {}
-                for kind in ("move", "fire"):
-                    if not UNIT_VALID_IN_VARIANT[ui, vid] or n < MIN_SAMPLES_FOR_PLOT:
-                        kind_data[kind] = (None, 0.0)
-                    else:
-                        grid, mass = _spatial_heatmap(
-                            vmask, unit_idx=ui, action_kind=kind)
-                        kind_data[kind] = (grid, mass)
-                peaks = [np.nanmax(g) for g, _ in kind_data.values()
-                         if g is not None and not np.all(np.isnan(g))]
-                peaks = [p for p in peaks if np.isfinite(p)]
-                pair_vmax = max(peaks) if peaks else None
-                for kind_idx, kind in enumerate(("move", "fire")):
-                    col_idx = vid * 2 + kind_idx
-                    ax = axes4[ui, col_idx]
-                    label = "Move" if kind == "move" else "Fire"
-                    grid, mass = kind_data[kind]
-                    if not UNIT_VALID_IN_VARIANT[ui, vid]:
-                        _draw_na(ax)
-                        ax.set_title(f"{uname} — {label}\n{vname.capitalize()} (N/A)",
-                                     fontsize=8)
-                    elif n < MIN_SAMPLES_FOR_PLOT or grid is None:
-                        _draw_na(ax, label=f"n={n}\n(insufficient)")
-                        ax.set_title(f"{uname} — {label}\n{vname.capitalize()} (n={n})",
-                                     fontsize=8)
-                    else:
-                        _draw_hex_heatmap(
-                            ax, grid,
-                            board_side_hint=VARIANT_BOARD_SIDE[vid],
-                            vmax=pair_vmax)
-                        ax.set_title(
-                            f"{uname} — {label}\n"
-                            f"{vname.capitalize()} (n={n}, Σπ/unit={mass:.3f})",
-                            fontsize=8)
-        plt.tight_layout()
-
-        # --- Figure 5: unit count by type × phase × variant ---
-        _phase_list = [
-            (deploy_mask,     "Deploy"),
-            (standstill_mask, "Standstill"),
-            (attrition_mask,  "Attrition"),
-            (portal_mask,     "Portal"),
-        ]
-        fig5, axes5u = plt.subplots(4, 4, figsize=(16, 12))
-        fig5.suptitle(f"Iteration {iteration} — Unit Count by Type × Phase × Variant "
-                      "(y-axis shared per variant column)", fontsize=12)
-        _bar_x = np.arange(3); _bar_w = 0.35
-
-        # Precompute averages so we can lock the y-axis per variant column.
-        # Shape: [phase][variant][side][unit] where side 0=mine, 1=opp.
-        avgs = np.full((len(_phase_list), len(UNIFIED_VARIANT_NAMES), 2, 3), np.nan)
-        ns   = np.zeros((len(_phase_list), len(UNIFIED_VARIANT_NAMES)), dtype=int)
-        for pi_row, (pmask, _) in enumerate(_phase_list):
-            for vid in range(len(UNIFIED_VARIANT_NAMES)):
-                combo = pmask & (variant_ids == vid)
-                ns[pi_row, vid] = int(combo.sum())
-                if ns[pi_row, vid] < MIN_SAMPLES_FOR_PLOT:
-                    continue
-                for ui in range(3):
-                    if not UNIT_VALID_IN_VARIANT[ui, vid]:
-                        continue
-                    avgs[pi_row, vid, 0, ui] = unit_counts_my[ui][combo].mean()
-                    avgs[pi_row, vid, 1, ui] = unit_counts_opp[ui][combo].mean()
-
-        # Per-variant y-max: largest avg across all phases / sides / units, +10% headroom.
-        # All-NaN columns (variant had < MIN_SAMPLES in every phase) are
-        # expected during skirmish-only / variant-restricted runs; the
-        # np.where below defaults them to 1.0.
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
-            ymax_per_variant = np.nanmax(avgs, axis=(0, 2, 3))
-        ymax_per_variant = np.where(np.isnan(ymax_per_variant), 1.0, ymax_per_variant)
-        ymax_per_variant = np.maximum(ymax_per_variant * 1.1, 0.5)
-
-        for pi_row, (pmask, pname) in enumerate(_phase_list):
-            for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                ax = axes5u[pi_row, vid]
-                n = int(ns[pi_row, vid])
-                ax.set_title(f"{vname.capitalize()} — {pname}\n(n={n})", fontsize=7)
-                if n < MIN_SAMPLES_FOR_PLOT:
-                    _draw_na(ax, label=f"n={n}\n(insufficient)" if n > 0 else "N/A")
-                    continue
-                my_avg  = avgs[pi_row, vid, 0]
-                opp_avg = avgs[pi_row, vid, 1]
-                # Per-bar alpha — fade invalid (unit, variant) bars to grey.
-                my_colors  = [unit_colors[ui] if UNIT_VALID_IN_VARIANT[ui, vid]
-                              else "#dddddd" for ui in range(3)]
-                opp_colors = [unit_colors[ui] if UNIT_VALID_IN_VARIANT[ui, vid]
-                              else "#dddddd" for ui in range(3)]
-                ax.bar(_bar_x - _bar_w/2, np.nan_to_num(my_avg),  _bar_w,
-                       color=my_colors,  alpha=0.85)
-                ax.bar(_bar_x + _bar_w/2, np.nan_to_num(opp_avg), _bar_w,
-                       color=opp_colors, alpha=0.45)
-                ax.set_xticks(_bar_x); ax.set_xticklabels(["F", "C", "D"], fontsize=8)
-                ax.set_ylim(0, ymax_per_variant[vid])
-                ax.set_ylabel("Avg units", fontsize=7)
-                if pi_row == 0 and vid == 0:
-                    legend_p = [_Patch(facecolor="#888888", alpha=0.85, label="Mine"),
-                                _Patch(facecolor="#888888", alpha=0.45, label="Opp")]
-                    ax.legend(handles=legend_p, fontsize=6)
-        plt.tight_layout()
-
-        # --- Figure 6: per-phase unit × variant spatial heatmaps.
-        # Same 3×8 layout as Figure 4, one figure per phase. vmax is shared
-        # within each (unit, variant) pair for move/fire comparison; cross-
-        # phase magnitude comparison goes through Fig 1 (or by reading the
-        # Σπ/unit numbers in titles here).
-        fig6_list = []
-        for pmask, pname in _phase_list:
-            f, axs = plt.subplots(3, 8, figsize=(28, 12))
-            f.suptitle(
-                f"Iteration {iteration} — Unit × Variant Heatmap: {pname} "
-                "(π mass per unit-instance; vmax shared per (unit, variant) pair)",
-                fontsize=13)
-            for ui, uname in enumerate(unit_names):
-                for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                    vmask = pmask & (variant_ids == vid)
-                    n = int(vmask.sum())
-                    kind_data = {}
-                    for kind in ("move", "fire"):
-                        if not UNIT_VALID_IN_VARIANT[ui, vid] or n < MIN_SAMPLES_FOR_PLOT:
-                            kind_data[kind] = (None, 0.0)
-                        else:
-                            grid, mass = _spatial_heatmap(
-                                vmask, unit_idx=ui, action_kind=kind)
-                            kind_data[kind] = (grid, mass)
-                    peaks = [np.nanmax(g) for g, _ in kind_data.values()
-                             if g is not None and not np.all(np.isnan(g))]
-                    peaks = [p for p in peaks if np.isfinite(p)]
-                    pair_vmax = max(peaks) if peaks else None
-                    for kind_idx, kind in enumerate(("move", "fire")):
-                        col_idx = vid * 2 + kind_idx
-                        ax = axs[ui, col_idx]
-                        label = "Move" if kind == "move" else "Fire"
-                        grid, mass = kind_data[kind]
-                        if not UNIT_VALID_IN_VARIANT[ui, vid]:
-                            _draw_na(ax)
-                            ax.set_title(
-                                f"{uname} — {label}\n{vname.capitalize()} (N/A)",
-                                fontsize=8)
-                        elif n < MIN_SAMPLES_FOR_PLOT or grid is None:
-                            _draw_na(ax, label=f"n={n}\n(insufficient)")
-                            ax.set_title(
-                                f"{uname} — {label}\n{vname.capitalize()} (n={n})",
-                                fontsize=8)
-                        else:
-                            _draw_hex_heatmap(
-                                ax, grid,
-                                board_side_hint=VARIANT_BOARD_SIDE[vid],
-                                vmax=pair_vmax)
-                            ax.set_title(
-                                f"{uname} — {label}\n"
-                                f"{vname.capitalize()} (n={n}, Σπ/unit={mass:.3f})",
-                                fontsize=8)
-            plt.tight_layout()
-            fig6_list.append((f, pname))
-
-        # --- Figure 7: value calibration curves per variant ---
-        fig7 = None
-        if variant_stats:
-            n_variants = len(variant_stats)
-            fig7, axes7 = plt.subplots(1, n_variants, figsize=(4 * n_variants, 4))
-            if n_variants == 1:
-                axes7 = [axes7]
-            fig7.suptitle(f"Iteration {iteration} — Value Calibration", fontsize=12)
-            bins = np.linspace(0, 1, 11)
-            bin_centers = (bins[:-1] + bins[1:]) / 2
-            MIN_BIN_COUNT = 10
-            for ax, (vname, stats) in zip(axes7, variant_stats.items()):
-                vp = stats["v_pred"]
-                va = stats["v_actual"]
-                bin_idx = np.digitize(vp, bins) - 1
-                bin_idx = np.clip(bin_idx, 0, 9)
-                counts = np.array([(bin_idx == b).sum() for b in range(10)])
-                # Only plot bins with enough support to be informative.
-                actual_means = np.array([
-                    va[bin_idx == b].mean() if counts[b] >= MIN_BIN_COUNT else np.nan
-                    for b in range(10)
-                ])
-                ax.plot([0, 1], [0, 1], "k--", alpha=0.4, label="Perfect")
-                valid = ~np.isnan(actual_means)
-                sc = ax.scatter(bin_centers[valid], actual_means[valid],
-                                c=counts[valid], cmap="YlOrRd", s=60, zorder=3)
-                ax.plot(bin_centers[valid], actual_means[valid], alpha=0.7)
-                # Annotate per-bin n below the curve.
-                for b in range(10):
-                    if counts[b] > 0:
-                        ax.text(bin_centers[b], 0.02, f"{counts[b]}",
-                                ha="center", va="bottom", fontsize=6,
-                                color="#666666",
-                                alpha=1.0 if counts[b] >= MIN_BIN_COUNT else 0.4)
-                plt.colorbar(sc, ax=ax, label="n samples")
-                ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-                ax.set_xlabel("Predicted win prob"); ax.set_ylabel("Actual win rate")
-                ax.set_title(f"{vname.capitalize()}\n(n={len(vp)}, "
-                             f"bins≥{MIN_BIN_COUNT}: {int(valid.sum())})",
-                             fontsize=9)
-                ax.legend(fontsize=7)
-            plt.tight_layout()
-
-        run.track(aim_lib.Image(fig1), name="action_heatmap",
-                  epoch=iteration, step=total_train_steps)
-        run.track(aim_lib.Image(fig3), name="unit_action_breakdown",
-                  epoch=iteration, step=total_train_steps)
-        run.track(aim_lib.Image(fig4), name="unit_variant_heatmap",
-                  epoch=iteration, step=total_train_steps)
-        run.track(aim_lib.Image(fig5), name="unit_count_by_phase",
-                  epoch=iteration, step=total_train_steps)
-        for f6, pname in fig6_list:
-            run.track(aim_lib.Image(f6), name="unit_variant_heatmap_by_phase",
-                      epoch=iteration, step=total_train_steps, context={"phase": pname})
-        if fig7 is not None:
-            run.track(aim_lib.Image(fig7), name="value_calibration",
-                      epoch=iteration, step=total_train_steps)
-    except Exception:
-        pass
-    finally:
-        plt.close("all")
+def _seed_initial_checkpoint(initial_checkpoint, checkpoint_dir, experiment_name):
+    """Copy a caller-selected checkpoint into a new run's iteration-zero slot."""
+    source = os.path.abspath(initial_checkpoint)
+    if not os.path.isfile(source):
+        raise FileNotFoundError(f"Initial checkpoint does not exist: {source}")
+    destination = os.path.join(checkpoint_dir, f"0000-{experiment_name}.pt")
+    shutil.copy2(source, destination)
+    return destination
 
 
-def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
+def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from="", initial_checkpoint=""):
     """Main training loop.
 
     Args:
         config: TrainConfig instance with all training parameters.
-        experiment_dir: Path to experiment directory (e.g. data/connect4/densenet-4d-12c-5k-100sims/).
+        experiment_dir: Path to experiment directory (e.g. data/uttt/my-experiment/).
         start: Iteration to resume from (0 = fresh start).
         aim_repo: Path for aim logging directory. Default None uses project root.
         bootstrap_from: Path to source experiment dir to bootstrap from (empty = no bootstrap).
+        initial_checkpoint: Checkpoint copied to iteration zero for a fresh run.
     """
     import neural_net
 
     Game = config.Game
     paths = config.resolve_paths(experiment_dir)
     experiment_name = os.path.basename(experiment_dir)
+
+    if initial_checkpoint and start != 0:
+        raise ValueError("initial_checkpoint is only valid for a fresh run")
+    if initial_checkpoint and bootstrap_from:
+        raise ValueError("initial_checkpoint and bootstrap_from cannot be used together")
 
     # Ensure all directories exist
     for key in ("checkpoint", "history", "tmp_history", "reservoir"):
@@ -3359,7 +2870,11 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
         import aim
         aim_hash_path = os.path.join(experiment_dir, ".aim_run_hash")
         if start > 0 and os.path.exists(aim_hash_path):
-            run = aim.Run(run_hash=open(aim_hash_path).read().strip(), repo=aim_repo)
+            run = aim.Run(
+                run_hash=open(aim_hash_path).read().strip(),
+                repo=aim_repo,
+                force_resume=True,
+            )
         else:
             run = aim.Run(experiment=experiment_name, repo=aim_repo)
             run.name = config.game
@@ -3380,6 +2895,11 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                 "lr_schedule": config.lr_schedule,
                 "full_mcts_visits": config.selfplay_mcts_visits,
                 "fast_mcts_visits": config.fast_mcts_visits,
+                "teacher_anchor_fraction": config.teacher_anchor_fraction,
+                "teacher_anchor_enabled": int(bool(config.teacher_anchor_dir)),
+                "selfplay_use_latest": config.selfplay_use_latest,
+                "gating_enabled": config.gating_enabled,
+                "uttt_ai_select_best": config.uttt_ai_select_best,
             }
         with open(aim_hash_path, "w") as f:
             f.write(run.hash)
@@ -3402,7 +2922,14 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
     fallback_checkpoint_dir = None
 
     if start == 0:
-        create_init_net()
+        if initial_checkpoint:
+            seeded_path = _seed_initial_checkpoint(
+                initial_checkpoint, paths["checkpoint"], experiment_name
+            )
+            with open(os.path.join(experiment_dir, "initial_checkpoint.json"), "w") as f:
+                json.dump({"source": os.path.abspath(initial_checkpoint), "seeded": seeded_path}, f)
+        else:
+            create_init_net()
 
         # Read bootstrap source size from checkpoints (ground truth)
         source_n = 0
@@ -3481,7 +3008,6 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                     and source_cfg.channels == config.channels
                     and source_cfg.kernel_size == config.kernel_size
                     and source_cfg.dense_net == config.dense_net
-                    and source_cfg.star_gambit_spatial == config.star_gambit_spatial
                     and source_cfg.head_channels == config.head_channels
                     and source_cfg.head_pool == config.head_pool
                 )
@@ -3725,10 +3251,18 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
             ]
             current_best = max(candidates, key=lambda i: elo[i]) if candidates else 0
 
+    uttt_ai_champion_path = os.path.join(experiment_dir, "uttt_ai_champion.json")
+    uttt_ai_champion = {"iteration": 0, "score": float("-inf")}
+    if os.path.exists(uttt_ai_champion_path):
+        with open(uttt_ai_champion_path, encoding="utf-8") as f:
+            uttt_ai_champion = json.load(f)
+        if config.uttt_ai_select_best:
+            current_best = int(uttt_ai_champion["iteration"])
+
     postfix = {"best": current_best}
     panel = [current_best]
 
-    # Unified variant mixing state (only used for star_gambit_unified).
+    # Legacy variant state remains inert for UTTT.
     unified_probs = None
     variant_sample_count_history = []  # rolling 5-iter window to smooth prob corrections
     if _is_unified_game(config) and start > 0:
@@ -3839,47 +3373,51 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
             stage_times["history"] = time.time() - stage_start
 
             stage_start = time.time()
-            with TracyZone("stage_elo"):
-                elo = get_elo(elo, wr, i)
-                # Record the train step at which this iter's live elo is logged.
-                # Same value is reused for whr's overwrite-logging at this epoch
-                # so the two metrics share the same x-axis position in aim.
-                train_steps_per_iter[i] = total_train_steps
-                run.track(elo[i], name="elo", epoch=i, step=total_train_steps, context={"type": "current"})
-                run.track(elo[current_best], name="elo", epoch=i, step=total_train_steps, context={"type": "best"})
-                if elo_v is not None:
-                    for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                        if not np.all(np.isnan(wr_v[vid][i])):
-                            elo_v[vid] = get_elo(elo_v[vid], wr_v[vid], i)
-                        # Per-variant elo now lives on the same `elo` metric
-                        # with a `variant` context tag (was `variant_elo`).
-                        run.track(elo_v[vid][i], name="elo", epoch=i, step=total_train_steps,
-                                  context={"type": "current", "variant": vname})
+            with TracyZone("stage_rating"):
+                if config.elo_enabled or config.whr_enabled:
+                    # Record the train step at which this iter's live rating is
+                    # logged. WHR overwrite-logging reuses the same x-axis.
+                    train_steps_per_iter[i] = total_train_steps
 
-                # WHR refit on raw W/L/D counts (no rate-based approximation,
-                # no Wiener prior -- each iter is a fully independent player).
-                # aim's overwrite semantics keep the chart at the latest refit.
-                whr = whr_refit(wins, draws, max_sweeps=200, tol=0.1)
-                if whr_v is not None:
-                    for vid in range(len(UNIFIED_VARIANT_NAMES)):
-                        whr_v[vid] = whr_refit(
-                            wins_v[vid], draws_v[vid], max_sweeps=200, tol=0.1)
-                for j in range(i + 1):
-                    step_j = int(train_steps_per_iter[j])
-                    run.track(float(whr[j]), name="whr", epoch=j, step=step_j,
-                              context={"type": "current"})
-                    if whr_v is not None:
+                if config.elo_enabled:
+                    elo = get_elo(elo, wr, i)
+                    run.track(elo[i], name="elo", epoch=i, step=total_train_steps, context={"type": "current"})
+                    run.track(elo[current_best], name="elo", epoch=i, step=total_train_steps, context={"type": "best"})
+                    if elo_v is not None:
                         for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                            run.track(float(whr_v[vid][j]), name="whr",
-                                      epoch=j, step=step_j,
+                            if not np.all(np.isnan(wr_v[vid][i])):
+                                elo_v[vid] = get_elo(elo_v[vid], wr_v[vid], i)
+                            # Per-variant elo now lives on the same `elo` metric
+                            # with a `variant` context tag (was `variant_elo`).
+                            run.track(elo_v[vid][i], name="elo", epoch=i, step=total_train_steps,
                                       context={"type": "current", "variant": vname})
+                    postfix["elo"] = int(elo[i])
+                    np.savetxt(os.path.join(experiment_dir, "elo.csv"), elo, delimiter=",")
 
-                postfix["elo"] = int(elo[i])
-                postfix["whr"] = int(whr[i])
+                if config.whr_enabled:
+                    # WHR refit on raw W/L/D counts (no rate-based approximation,
+                    # no Wiener prior -- each iter is a fully independent player).
+                    # aim's overwrite semantics keep the chart at the latest refit.
+                    whr = whr_refit(wins, draws, max_sweeps=200, tol=0.1)
+                    if whr_v is not None:
+                        for vid in range(len(UNIFIED_VARIANT_NAMES)):
+                            whr_v[vid] = whr_refit(
+                                wins_v[vid], draws_v[vid], max_sweeps=200, tol=0.1)
+                    for j in range(i + 1):
+                        step_j = int(train_steps_per_iter[j])
+                        run.track(float(whr[j]), name="whr", epoch=j, step=step_j,
+                                  context={"type": "current"})
+                        if whr_v is not None:
+                            for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
+                                run.track(float(whr_v[vid][j]), name="whr",
+                                          epoch=j, step=step_j,
+                                          context={"type": "current", "variant": vname})
+                    postfix["whr"] = int(whr[i])
+                    np.savetxt(os.path.join(experiment_dir, "whr.csv"), whr, delimiter=",")
+
                 pbar.set_postfix(postfix)
-                np.savetxt(os.path.join(experiment_dir, "elo.csv"), elo, delimiter=",")
-                np.savetxt(os.path.join(experiment_dir, "whr.csv"), whr, delimiter=",")
-                _save_train_steps_per_iter(experiment_dir, train_steps_per_iter)
+                if config.elo_enabled or config.whr_enabled:
+                    _save_train_steps_per_iter(experiment_dir, train_steps_per_iter)
                 # Persist wr + raw counts. Without these, a crash between
                 # training and gating's save would cause iter i to be skipped
                 # on resume, leaving wr[i, i-compare_past] permanently NaN.
@@ -3888,8 +3426,10 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                 if wr_v is not None:
                     for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
                         np.savetxt(os.path.join(experiment_dir, f"win_rate_{vname}.csv"), wr_v[vid], delimiter=",")
-                        np.savetxt(os.path.join(experiment_dir, f"elo_{vname}.csv"), elo_v[vid], delimiter=",")
-                        np.savetxt(os.path.join(experiment_dir, f"whr_{vname}.csv"), whr_v[vid], delimiter=",")
+                        if config.elo_enabled:
+                            np.savetxt(os.path.join(experiment_dir, f"elo_{vname}.csv"), elo_v[vid], delimiter=",")
+                        if config.whr_enabled:
+                            np.savetxt(os.path.join(experiment_dir, f"whr_{vname}.csv"), whr_v[vid], delimiter=",")
                         _save_counts(experiment_dir, vname, wins_v[vid], draws_v[vid])
             stage_times["elo"] = time.time() - stage_start
 
@@ -3909,9 +3449,14 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                     for vi, vname in enumerate(UNIFIED_VARIANT_NAMES):
                         run.track(unified_probs[vi], name="variant_prob", epoch=i,
                                   step=total_train_steps, context={"variant": vname})
+                selfplay_parent = selfplay_parent_iteration(config, i, current_best)
+                run.track(
+                    selfplay_parent, name="selfplay_network", epoch=i,
+                    step=total_train_steps,
+                )
                 sp = self_play(
                     config, paths, experiment_name,
-                    current_best, i,
+                    selfplay_parent, i,
                     config.selfplay_mcts_visits,
                     config.fast_mcts_visits,
                     variant_probs=unified_probs,
@@ -3993,8 +3538,10 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                 run.track(oldest_iteration, name="history", epoch=i, step=total_train_steps, context={"type": "oldest_iteration"})
                 lr = get_lr(config, i, lr_state)
                 run.track(lr, name="learning_rate", epoch=i, step=total_train_steps)
+                parent_iter = current_best if config.train_from_best else i
                 v_loss, pi_loss, total_train_steps = train(
-                    config, paths, experiment_name, i, hist_size, run, total_train_steps, lr=lr
+                    config, paths, experiment_name, i, hist_size, run,
+                    total_train_steps, lr=lr, parent_iteration=parent_iter
                 )
                 np.savetxt(
                     os.path.join(experiment_dir, "total_train_steps.txt"),
@@ -4061,6 +3608,37 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
             stage_times["reservoir"] = time.time() - stage_start
 
             stage_start = time.time()
+            with TracyZone("stage_uttt_ai_eval"):
+                uttt_ai_metrics = maybe_eval_uttt_ai(
+                    config, paths, experiment_name, i + 1, run, total_train_steps
+                )
+                if uttt_ai_metrics is not None:
+                    uttt_ai_wr, uttt_ai_dr, _ = uttt_ai_metrics
+                    if config.uttt_ai_select_best:
+                        uttt_ai_champion, improved = update_uttt_ai_champion(
+                            uttt_ai_champion, i + 1, uttt_ai_wr, uttt_ai_dr
+                        )
+                        with open(uttt_ai_champion_path, "w", encoding="utf-8") as f:
+                            json.dump(uttt_ai_champion, f)
+                        if improved:
+                            current_best = int(uttt_ai_champion["iteration"])
+                            lr_state["last_best_iter"] = current_best
+                            postfix["best"] = current_best
+                            with open(lr_state_path, "w", encoding="utf-8") as f:
+                                json.dump(lr_state, f)
+                        run.track(
+                            float(uttt_ai_champion["score"]),
+                            name="uttt_ai_score", epoch=i + 1,
+                            step=total_train_steps,
+                            context={"search": "raw_policy", "type": "best"},
+                        )
+                    postfix["vs uttt.ai"] = (
+                        f"{_fmt_pct(uttt_ai_wr)}/{_fmt_pct(uttt_ai_dr)}D"
+                    )
+                    pbar.set_postfix(postfix)
+            stage_times["uttt_ai_eval"] = time.time() - stage_start
+
+            stage_start = time.time()
             with TracyZone("stage_gating"):
                 next_net = i + 1
                 panel_nn_rate = 0
@@ -4072,8 +3650,9 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                 panel_vm = 0
                 best_win_rate = 0
                 gating_probs = _compute_gating_probs(config) if _is_unified_game(config) else None
+                gate_panel = panel if config.gating_enabled else []
                 for gate_net in tqdm.tqdm(
-                    panel, desc=f"Pitting against Panel {panel}", leave=False
+                    gate_panel, desc=f"Pitting against Panel {gate_panel}", leave=False
                 ):
                     (nn_rate, draw_rate, _, game_length, gate_depth, gate_entropy,
                      gate_mpt, gate_vm, variant_nn_rates, variant_draw_rates,
@@ -4134,45 +3713,48 @@ def main(config, experiment_dir, start=0, aim_repo=None, bootstrap_from=""):
                         best_win_rate = g_full
                         postfix["vs best"] = _fmt_pct(best_win_rate)
                         pbar.set_postfix(postfix)
-                panel_nn_rate /= len(panel)
-                panel_draw_rate /= len(panel)
-                panel_game_length /= len(panel)
-                panel_depth /= len(panel)
-                panel_entropy /= len(panel)
-                panel_mpt /= len(panel)
-                panel_vm /= len(panel)
-                run.track(panel_nn_rate, name="win_rate", epoch=next_net, step=total_train_steps, context={"vs": "panel", "from": "all_games"})
-                run.track(panel_draw_rate, name="draw_rate", epoch=next_net, step=total_train_steps, context={"vs": "panel", "from": "all_games"})
-                run.track(panel_game_length, name="average_game_length", epoch=next_net, context={"vs": "panel"})
-                run.track(panel_depth, name="avg_leaf_depth", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
-                run.track(panel_entropy, name="search_entropy", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
-                run.track(panel_mpt, name="moves_per_turn", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
-                run.track(panel_vm, name="avg_valid_moves", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
-                panel_win_rate = panel_nn_rate + panel_draw_rate / Game.NUM_PLAYERS()
-                if len(panel) > 1:
-                    postfix["vs panel"] = _fmt_pct(panel_win_rate)
-                panel_ratio = len(panel) / config.gating_panel_size
-                wanted_panel_win_rate = (config.gating_panel_win_rate * panel_ratio) + (
-                    config.gating_best_win_rate * (1.0 - panel_ratio)
-                )
-                if (
-                    panel_win_rate > wanted_panel_win_rate
-                    and best_win_rate > config.gating_best_win_rate
-                ):
-                    current_best = next_net
-                    lr_state['last_best_iter'] = next_net
-                    postfix["best"] = current_best
-                    pbar.set_postfix(postfix)
-                    panel.append(current_best)
-                    while len(panel) > config.gating_panel_size:
-                        panel = panel[1:]
-                np.savetxt(os.path.join(experiment_dir, "win_rate.csv"), wr, delimiter=",")
-                _save_counts(experiment_dir, "", wins, draws)
-                if wr_v is not None:
-                    for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
-                        np.savetxt(os.path.join(experiment_dir, f"win_rate_{vname}.csv"), wr_v[vid], delimiter=",")
-                        np.savetxt(os.path.join(experiment_dir, f"elo_{vname}.csv"), elo_v[vid], delimiter=",")
-                        _save_counts(experiment_dir, vname, wins_v[vid], draws_v[vid])
+                if gate_panel:
+                    panel_nn_rate /= len(gate_panel)
+                    panel_draw_rate /= len(gate_panel)
+                    panel_game_length /= len(gate_panel)
+                    panel_depth /= len(gate_panel)
+                    panel_entropy /= len(gate_panel)
+                    panel_mpt /= len(gate_panel)
+                    panel_vm /= len(gate_panel)
+                    run.track(panel_nn_rate, name="win_rate", epoch=next_net, step=total_train_steps, context={"vs": "panel", "from": "all_games"})
+                    run.track(panel_draw_rate, name="draw_rate", epoch=next_net, step=total_train_steps, context={"vs": "panel", "from": "all_games"})
+                    run.track(panel_game_length, name="average_game_length", epoch=next_net, context={"vs": "panel"})
+                    run.track(panel_depth, name="avg_leaf_depth", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
+                    run.track(panel_entropy, name="search_entropy", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
+                    run.track(panel_mpt, name="moves_per_turn", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
+                    run.track(panel_vm, name="avg_valid_moves", epoch=next_net, step=total_train_steps, context={"vs": "panel"})
+                    panel_win_rate = panel_nn_rate + panel_draw_rate / Game.NUM_PLAYERS()
+                    if len(gate_panel) > 1:
+                        postfix["vs panel"] = _fmt_pct(panel_win_rate)
+                    panel_ratio = len(gate_panel) / config.gating_panel_size
+                    wanted_panel_win_rate = (config.gating_panel_win_rate * panel_ratio) + (
+                        config.gating_best_win_rate * (1.0 - panel_ratio)
+                    )
+                    if (
+                        panel_win_rate > wanted_panel_win_rate
+                        and best_win_rate > config.gating_best_win_rate
+                    ):
+                        current_best = next_net
+                        lr_state['last_best_iter'] = next_net
+                        with open(lr_state_path, 'w') as f:
+                            json.dump(lr_state, f)
+                        postfix["best"] = current_best
+                        pbar.set_postfix(postfix)
+                        panel.append(current_best)
+                        while len(panel) > config.gating_panel_size:
+                            panel = panel[1:]
+                    np.savetxt(os.path.join(experiment_dir, "win_rate.csv"), wr, delimiter=",")
+                    _save_counts(experiment_dir, "", wins, draws)
+                    if wr_v is not None:
+                        for vid, vname in enumerate(UNIFIED_VARIANT_NAMES):
+                            np.savetxt(os.path.join(experiment_dir, f"win_rate_{vname}.csv"), wr_v[vid], delimiter=",")
+                            np.savetxt(os.path.join(experiment_dir, f"elo_{vname}.csv"), elo_v[vid], delimiter=",")
+                            _save_counts(experiment_dir, vname, wins_v[vid], draws_v[vid])
             stage_times["gating"] = time.time() - stage_start
 
             # Per-checkpoint diagnostics (Features 1, 3).

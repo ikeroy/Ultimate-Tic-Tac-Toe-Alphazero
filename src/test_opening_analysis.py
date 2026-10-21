@@ -1,7 +1,7 @@
 """Tests for opening_analysis.py.
 
 Layered like the module itself: tree builder, opening extractor, cross-iter
-narrator, and a slow end-to-end test (opt-in) using a real connect4 checkpoint.
+narrator, and focused unit coverage for the UTTT analysis pipeline.
 
 Most tests use stub states and a stub evaluator so we don't need the C++
 MCTS backend; the dependency-injection hooks on build_tree make this clean.
@@ -585,66 +585,3 @@ class TestGameUIFallback:
         label = ui.format_move(None, 42)
         assert isinstance(label, str)
         assert "42" in label
-
-
-# ---------------------------------------------------------------------------
-# End-to-end smoke (slow, opt-in)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.slow
-def test_end_to_end_connect4_smoke(tmp_path):
-    """Run the analyzer on a real connect4 checkpoint at 2 iterations.
-
-    Skipped unless the connect4 experiment exists in data/.
-    """
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
-    if not os.path.isdir(os.path.join(base_dir, "connect4")):
-        pytest.skip("data/connect4 not present")
-
-    import alphazero  # noqa: F401 - confirm backend is available
-    from play import discover_checkpoints
-    experiments = discover_checkpoints("connect4", base_dir)
-    if not experiments:
-        pytest.skip("No connect4 checkpoints")
-    exp_name, ckpts = next(iter(experiments.items()))
-    if len(ckpts) < 2:
-        pytest.skip("Need at least 2 connect4 checkpoints")
-
-    # Pick two iterations.
-    iters = sorted({ckpts[0][0], ckpts[-1][0]})
-
-    # Build setup manually (skip interactive prompts).
-    Game = alphazero.Connect4GS
-    ui = oa.get_game_ui("connect4")
-    train_config = oa._load_experiment_train_config(
-        os.path.join(base_dir, "connect4", exp_name)
-    )
-    mode_configs = {"eval": ModeConfig.eval_default(train_config)}
-    tree_config = TreeConfig(min_reach=0.05, opening_threshold=0.10,
-                            main_line_threshold=0.5, display_cap=10)
-
-    setup = {
-        "game_name": "connect4",
-        "Game": Game,
-        "checkpoint_game_name": "connect4",
-        "checkpoint_game_class": Game,
-        "ui": ui,
-        "experiment_name": exp_name,
-        "experiment_dir": os.path.join(base_dir, "connect4", exp_name),
-        "iter_to_path": dict(ckpts),
-        "iterations": iters,
-        "train_config": train_config,
-        "mode_configs": mode_configs,
-        "tree_config": tree_config,
-        "cache_size": 10_000,
-    }
-
-    rc = oa.run_analysis(setup)
-    assert rc == 0
-
-    # Verify expected files exist.
-    out_dir = os.path.join(setup["experiment_dir"], "openings")
-    for it in iters:
-        assert os.path.isfile(os.path.join(out_dir, f"iter_{it:04d}_eval.txt"))
-    assert os.path.isfile(os.path.join(out_dir, "summary_eval.md"))

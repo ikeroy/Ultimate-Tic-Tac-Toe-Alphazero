@@ -7,6 +7,7 @@ Uses only stdlib (tty, termios, sys) - no external dependencies.
 import sys
 import tty
 import termios
+import shutil
 
 
 def read_key():
@@ -69,7 +70,7 @@ class ActionSelector:
         # result: int (action_id), str (meta-command), or None (Tab pressed)
     """
 
-    def __init__(self, entries, preselect=None):
+    def __init__(self, entries, preselect=None, max_visible_actions=None):
         self.entries = entries
         self.selectable = [
             i for i, e in enumerate(entries) if e[0] == 'action'
@@ -86,6 +87,9 @@ class ActionSelector:
                     break
 
         self.total_lines = 0  # tracks lines printed for cursor-up
+        if max_visible_actions is None:
+            max_visible_actions = shutil.get_terminal_size((80, 24)).lines - 6
+        self.max_visible_actions = max(3, int(max_visible_actions))
 
     def _format_entry(self, entry_idx):
         """Format a single entry for display."""
@@ -107,21 +111,68 @@ class ActionSelector:
                 return f"    {text}"
         return str(entry)
 
-    def draw(self):
-        """Print the full menu to stdout."""
+    def _visible_entry_indices(self):
+        """Return menu entry indices for a cursor-centered action viewport."""
+        action_count = len(self.selectable)
+        slots = min(self.max_visible_actions, action_count)
+        above_marker = False
+        below_marker = False
+        start = 0
+        end = slots
+        for _ in range(4):
+            visible_count = max(1, slots - int(above_marker) - int(below_marker))
+            half = visible_count // 2
+            start = self.cursor - half
+            start = max(0, min(start, action_count - visible_count))
+            end = start + visible_count
+            next_above = start > 0
+            next_below = end < action_count
+            if next_above == above_marker and next_below == below_marker:
+                break
+            above_marker = next_above
+            below_marker = next_below
+
+        visible_actions = set(self.selectable[start:end])
+        out = []
+        inserted_above = False
+        for i, entry in enumerate(self.entries):
+            if entry[0] == 'action':
+                if above_marker and not inserted_above:
+                    out.append(("virtual", f"  {DIM}... {start} moves above ...{RESET_ATTR}"))
+                    inserted_above = True
+                if i in visible_actions:
+                    out.append(i)
+            else:
+                out.append(i)
+        if below_marker:
+            hidden_below = action_count - end
+            out.append(("virtual", f"  {DIM}... {hidden_below} moves below ...{RESET_ATTR}"))
+        return out
+
+    def _render_lines(self):
+        """Render the current selector viewport."""
         lines = []
-        for i in range(len(self.entries)):
-            lines.append(self._format_entry(i))
+        for item in self._visible_entry_indices():
+            if isinstance(item, tuple) and item[0] == "virtual":
+                lines.append(item[1])
+            else:
+                lines.append(self._format_entry(item))
 
         lines.append('')
+        position = f"{self.cursor + 1}/{len(self.selectable)}"
         lines.append(
-            f"{DIM}[{RESET_ATTR}\u2191\u2193 Navigate{DIM}]  [{RESET_ATTR}"
+            f"{DIM}[{RESET_ATTR}{position}{DIM}]  [{RESET_ATTR}"
+            f"\u2191\u2193 Navigate{DIM}]  [{RESET_ATTR}"
             f"Enter Select{DIM}]  [{RESET_ATTR}"
             f"Tab Type{DIM}]  [{RESET_ATTR}"
             f"q Quit{DIM}]  [{RESET_ATTR}"
             f"u Undo{DIM}]{RESET_ATTR}"
         )
+        return lines
 
+    def draw(self):
+        """Print the current menu viewport to stdout."""
+        lines = self._render_lines()
         output = '\n'.join(lines)
         sys.stdout.write(output + '\n')
         sys.stdout.flush()
@@ -133,20 +184,14 @@ class ActionSelector:
         if self.total_lines > 0:
             sys.stdout.write(f'\033[{self.total_lines}A')
 
-        for i in range(len(self.entries)):
-            sys.stdout.write(CLEAR_LINE + self._format_entry(i) + '\n')
-
-        # Footer (blank line + hint line)
-        sys.stdout.write(CLEAR_LINE + '\n')
-        sys.stdout.write(
-            CLEAR_LINE +
-            f"{DIM}[{RESET_ATTR}\u2191\u2193 Navigate{DIM}]  [{RESET_ATTR}"
-            f"Enter Select{DIM}]  [{RESET_ATTR}"
-            f"Tab Type{DIM}]  [{RESET_ATTR}"
-            f"q Quit{DIM}]  [{RESET_ATTR}"
-            f"u Undo{DIM}]{RESET_ATTR}\n"
-        )
+        old_total = self.total_lines
+        lines = self._render_lines()
+        for line in lines:
+            sys.stdout.write(CLEAR_LINE + line + '\n')
+        for _ in range(old_total - len(lines)):
+            sys.stdout.write(CLEAR_LINE + '\n')
         sys.stdout.flush()
+        self.total_lines = max(old_total, len(lines))
 
     def cleanup(self):
         """Ensure cursor is at the bottom of the menu."""

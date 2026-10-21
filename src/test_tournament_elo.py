@@ -2,7 +2,9 @@
 
 import math
 import numpy as np
-from tournament import calc_elo
+import alphazero
+import tournament
+from tournament import UTTT_AI_AGENT, calc_elo, load_agent
 
 
 # Win matrix from a real 20-player monrad tournament that triggered the bug.
@@ -63,3 +65,28 @@ def test_elo_ordering_roughly_monotonic():
         assert elo[i] < median_elo, (
             f"Player {i} (early/weak) has ELO {elo[i]:.1f} >= median {median_elo:.1f}"
         )
+
+
+def test_cached_uttt_ai_agent_preserves_requested_visit_count(monkeypatch):
+    class FakeUtttAiPolicyValueNet:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    import tools.uttt_ai_adapter as adapter
+
+    monkeypatch.setattr(adapter, "UtttAiPolicyValueNet", FakeUtttAiPolicyValueNet)
+    monkeypatch.setattr(adapter, "default_model_path", lambda: "/tmp/fake-uttt-ai.onnx")
+    monkeypatch.delenv("UTTT_AI_REQUIRE_CUDA", raising=False)
+    monkeypatch.delenv("UTTT_AI_MODEL", raising=False)
+
+    cache = {}
+    first_agent, first_visits = load_agent(
+        alphazero.UltimateTicTacToeGS, UTTT_AI_AGENT, "", 512, [], nn_cache=cache
+    )
+    second_agent, second_visits = load_agent(
+        alphazero.UltimateTicTacToeGS, UTTT_AI_AGENT, "", 768, [], nn_cache=cache
+    )
+
+    assert first_visits == 512
+    assert second_agent is first_agent
+    assert second_visits == 768

@@ -3,7 +3,7 @@
 #include <future>
 
 #include "play_manager.h"
-#include "tawlbwrdd_gs.h"
+#include "uttt_gs.h"
 
 namespace alphazero {
 namespace {
@@ -16,7 +16,7 @@ void PlayGameSingleThreaded() {
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
   params.history_enabled = true;
   params.playout_cap_randomization = true;
-  auto pm = PlayManager{std::make_unique<tawlbwrdd_gs::TawlbwrddGS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play = std::async(std::launch::async, [&] { pm.play(); });
   play.wait();
 }
@@ -32,7 +32,7 @@ void PlayGameMultiThreaded() {
   params.eval_type = {EvalType::RANDOM, EvalType::RANDOM};
   params.history_enabled = true;
   params.playout_cap_randomization = true;
-  auto pm = PlayManager{std::make_unique<tawlbwrdd_gs::TawlbwrddGS>(), params};
+  auto pm = PlayManager{std::make_unique<uttt_gs::UltimateTicTacToeGS>(), params};
   auto play_workers = std::vector<std::future<void>>{workers};
   for (auto& pw : play_workers) {
     pw = std::async(std::launch::async, [&] { pm.play(); });
